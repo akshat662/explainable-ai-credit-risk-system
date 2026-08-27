@@ -532,3 +532,267 @@ leakage and the two data-quality observations above remain open items for
 a future phase, separate from this decision.
 
 ---
+
+## Decision: Logistic regression as the Phase 5 baseline model
+
+### Context:
+Phase 5 needs a first trained model to serve as a performance floor that
+later, more complex models (e.g. the XGBoost used only for the Phase 4
+leakage audit) are measured against.
+
+### Choice:
+`src/train_baseline.py` trains a single, un-tuned
+`LogisticRegression(max_iter=1000, class_weight="balanced", random_state=42)`
+via stratified 5-fold CV on `dev.parquet`, with no hyperparameter search.
+
+### Reasoning:
+- A linear model's coefficients are directly interpretable in sign and
+  relative magnitude, which matters for a project whose stated goal is a
+  *trustworthy*, explainable decision system — a baseline should be
+  something a reviewer can reason about without SHAP before more complex,
+  less directly-interpretable models are introduced.
+- `class_weight="balanced"` addresses the ~8% default rate without
+  resampling the data or hand-picking a class weight, keeping the
+  baseline a genuine off-the-shelf reference point rather than an already-
+  tuned result.
+- Explicitly *not* tuning hyperparameters here is intentional: a tuned
+  baseline would blur the line between "how good is a simple model
+  before any effort" and "how good is a simple model after effort,"
+  making it a less honest floor for later comparisons.
+
+### Alternatives considered:
+- **Start with a tree-based model as the baseline**: rejected — a tree
+  ensemble was already used in Phase 4 for the leakage audit specifically
+  *because* it doesn't need scaling/encoding; using it again as "the
+  baseline" would conflate the leakage-audit model with the first real
+  benchmarking result.
+
+### Impact:
+Every subsequent model in this project should be compared against this
+result (`reports/baseline_results.json`) before being considered an
+improvement, not against an arbitrary absolute threshold.
+
+---
+
+## Decision: Preprocessing lives inside a single sklearn Pipeline
+
+### Context:
+`dev.parquet` has missing values (per Phase 3) and both numeric and
+categorical (string / nullable-boolean) columns. Preprocessing statistics
+— imputation medians, scaling mean/variance, and known one-hot categories
+— must come from somewhere, and cross-validation makes "somewhere" a real
+question: computed once on all of `dev.parquet`, or per fold?
+
+### Choice:
+`SimpleImputer`, `StandardScaler`, and `OneHotEncoder` are composed via a
+`ColumnTransformer` and wrapped together with `LogisticRegression` in one
+`sklearn.pipeline.Pipeline`, which is what gets passed to
+`cross_validate()` — not fit once beforehand on the full dataset.
+
+### Reasoning:
+- If the median/scaler/category-set were fit on all of `dev.parquet`
+  before splitting into folds, every fold's "held-out" validation rows
+  would have quietly influenced the very preprocessing statistics used to
+  transform them — a classic, easy-to-miss form of leakage that inflates
+  CV scores without any obviously wrong step in the code.
+  `cross_validate(pipeline, X, y, cv=...)` instead refits the entire
+  Pipeline — imputer, scaler, encoder, and model — from scratch on each
+  fold's training split alone.
+- Column classification is done by dtype (`number` → numeric branch,
+  everything else → categorical branch) rather than an explicit
+  bool/object allow-list, since `EMERGENCYSTATE_MODE` loads from Parquet
+  as pandas' nullable `boolean` dtype (not numpy `bool`) — an allow-list
+  keyed on `["number", "bool"]` would have silently misrouted it into
+  `SimpleImputer`+`StandardScaler`, untested against that dtype; the
+  complement-based split was verified to route it to `OneHotEncoder`
+  instead, which was directly tested against its True/False/NA values.
+- No imputer is used ahead of `OneHotEncoder` (per the task's spec) —
+  verified directly (see code comment in `build_pipeline`) that sklearn
+  1.9's `OneHotEncoder` treats a missing categorical value as its own
+  category rather than erroring, so this omission is a verified fact
+  about the library, not an unchecked assumption.
+
+### Alternatives considered:
+- **Fit preprocessing once on all of `dev.parquet`, then cross-validate
+  only the model**: rejected — exactly the leakage pattern this decision
+  exists to avoid.
+
+### Impact:
+Any future model added to this project should follow the same pattern —
+preprocessing and model fit together inside one Pipeline passed to
+`cross_validate`, never fit on the full dataset ahead of splitting.
+
+---
+
+## Decision: PR-AUC as the primary metric, ROC-AUC reported alongside
+
+### Context:
+The dev set's default rate is ~8% (confirmed in Phase 3) — a substantially
+imbalanced target. ROC-AUC and PR-AUC can disagree in how favorably they
+represent a model under class imbalance.
+
+### Choice:
+Both metrics are computed and saved for every experiment
+(`reports/baseline_results.json`, and earlier `reports/leakage_results.json`),
+but PR-AUC (`average_precision`) is treated as the primary metric for
+comparing models going forward; ROC-AUC is reported for context and
+comparability with the Phase 4 leakage-audit numbers.
+
+### Reasoning:
+- ROC-AUC is computed against the true-negative rate, and with ~92% of
+  applicants being non-defaulters, a model can achieve a deceptively high
+  ROC-AUC while still performing poorly at identifying the minority
+  default class specifically — which is the class this system actually
+  needs to act on (a credit decision).
+- PR-AUC is sensitive to exactly this: it's computed from precision and
+  recall on the positive (default) class only, so it more directly
+  reflects how useful the model's default-risk ranking would be for the
+  business decision this whole project exists to support.
+- Reporting ROC-AUC alongside (not instead of) PR-AUC keeps the two
+  audit/benchmark artifacts (`leakage_results.json`,
+  `baseline_results.json`) comparable to each other on both metrics.
+
+### Alternatives considered:
+- **ROC-AUC only**: rejected — for an ~8% base rate, it is the more
+  optimistic and less business-relevant of the two metrics; using it
+  alone risks a false sense of confidence in a model that ranks the
+  minority class poorly.
+
+### Impact:
+Model selection and "is this an improvement" judgments in later phases
+should be argued primarily from PR-AUC movement, with ROC-AUC as
+supporting context — not the reverse.
+
+---
+
+## Decision: XGBoost as the nonlinear candidate model
+
+### Context:
+Phase 6 needs a nonlinear model to test whether the logistic baseline's
+linear decision boundary is leaving real, learnable signal on the table —
+credit risk features commonly interact (e.g. income-to-credit ratio
+matters differently across income brackets) in ways a linear model can't
+represent without manual feature crosses.
+
+### Choice:
+`src/train_xgboost.py` trains a single `XGBClassifier` with the exact
+8-parameter configuration specified (`n_estimators=300, learning_rate=0.1,
+max_depth=6, subsample=0.8, colsample_bytree=0.8, tree_method="hist",
+eval_metric="aucpr", random_state=42`), plus `enable_categorical=True`.
+
+### Reasoning:
+- Gradient-boosted trees capture nonlinearities and feature interactions
+  natively, without requiring the modeler to hand-specify which
+  interactions to test — a natural next step after a linear baseline.
+- `tree_method="hist"` natively handles missing values (consistent with
+  Phase 3's decision not to impute) and, combined with
+  `enable_categorical=True`, natively handles categorical splits — so all
+  146 raw features are used unmodified, identical to what the logistic
+  baseline saw (via one-hot encoding instead). This keeps the model
+  comparison about the *model*, not about one model seeing more
+  information than the other.
+- `enable_categorical=True` required one data-fix: `EMERGENCYSTATE_MODE`
+  loads as pandas' nullable `boolean` dtype, which XGBoost's categorical
+  encoder rejects outright (verified directly — it requires string or int
+  category values). Mapping `True`/`False` to strings before casting to
+  `category` (via `.map()`, which leaves genuine nulls as NaN rather than
+  a literal `"<NA>"` category) resolved this without dropping the column
+  or changing any model hyperparameter.
+- This is the same untuned model configuration already used for the
+  Phase 4 leakage audit, reused here as a benchmarking candidate — not
+  re-derived — keeping one canonical "reference nonlinear model" in the
+  project rather than two subtly different ones.
+
+### Alternatives considered:
+- **Drop the 16 categorical columns and train on numeric features only**
+  (as Phase 4's leakage-audit script did): rejected for this comparison
+  specifically — it would understate XGBoost's potential relative to the
+  baseline, which had access to those columns via one-hot encoding.
+
+### Impact:
+`reports/xgboost_results.json` and `reports/model_comparison.json` now
+reflect a same-information comparison between the two model families.
+Any future model added to this project should also use the full 146-
+feature set unless there's a specific reason to restrict it.
+
+---
+
+## Decision: Hyperparameter tuning deferred past Phase 6
+
+### Context:
+`XGBClassifier`'s configuration (n_estimators, learning_rate, max_depth,
+subsample, colsample_bytree) has many plausible values; none were swept
+in this phase.
+
+### Choice:
+The exact hyperparameter values specified for this phase are used as
+given, with no grid/random search, Bayesian optimization, or manual
+tuning performed anywhere in `src/train_xgboost.py`.
+
+### Reasoning:
+- Phase 6's purpose is to answer one question — "does a nonlinear model
+  meaningfully outperform the linear baseline at all" — which an untuned
+  model answers more honestly than a tuned one: a tuned XGBoost beating an
+  untuned logistic regression conflates "nonlinearity helps" with "more
+  optimization effort helps," making the comparison uninterpretable.
+- Any tuning search implicitly requires a validation signal to optimize
+  against. Performing that search now, before this project has decided
+  which of several models it's committing to, risks either overfitting to
+  the dev-set CV folds or creating pressure to peek at holdout — the
+  project's standing rule against exactly that
+  ([[decision-create-the-devholdout-split-before-any-modeling-and-lock-it]]).
+- Deferring tuning until a model family is actually selected also avoids
+  wasted tuning effort on a candidate that might not even be chosen.
+
+### Alternatives considered:
+- **Light tuning now, to see XGBoost's "real" ceiling**: rejected — scope
+  creep for a phase whose explicit goal is comparison, not optimization;
+  the task instructions for this phase state this directly.
+
+### Impact:
+The Phase 6 result (PR-AUC 0.2527 vs. baseline's 0.2334) should be read as
+"a nonlinear model, untuned, already outperforms the untuned linear
+baseline" — a lower bound on what XGBoost can do, not its ceiling. A
+future tuning phase should be scoped explicitly once a model family is
+chosen to move forward with.
+
+---
+
+## Decision: Every candidate model is compared against the baseline, not evaluated in isolation
+
+### Context:
+`reports/xgboost_results.json` alone reports XGBoost's CV metrics but says
+nothing about whether that's actually *better* than the alternative this
+project already has.
+
+### Choice:
+`build_comparison()` in `src/train_xgboost.py` always reads
+`reports/baseline_results.json` and writes `reports/model_comparison.json`
+— a required side-by-side artifact, not an optional one — hard-failing
+with a clear error if the baseline results don't exist yet rather than
+silently comparing against nothing.
+
+### Reasoning:
+- A model's absolute PR-AUC/ROC-AUC number is not, by itself,
+  interpretable as "good" or "bad" for this dataset — it only becomes
+  meaningful relative to a known reference point, which is exactly what
+  the Phase 5 baseline exists to be.
+- Making the comparison an artifact (JSON on disk), not just a printed
+  number, means the delta is available to any later phase or reviewer
+  without re-running both experiments.
+- Failing loudly if `baseline_results.json` is missing (rather than
+  skipping the comparison) prevents this phase from silently shipping an
+  incomplete evaluation.
+
+### Alternatives considered:
+- **Report XGBoost's metrics standalone, compare manually later**:
+  rejected — defers a comparison that's cheap to automate now and easy to
+  forget to do consistently later.
+
+### Impact:
+Every future candidate model in this project should follow the same
+pattern: write its own `*_results.json`, then extend or regenerate
+`model_comparison.json` against the current best-known baseline, so the
+comparison history accumulates rather than requiring manual reconciliation.
+
+---

@@ -1,0 +1,24 @@
+{
+  "logistic_regression": {
+    "feature_count": 146,
+    "metrics": {
+      "roc_auc_mean": 0.7560269883177395,
+      "roc_auc_std": 0.002289232030231527,
+      "pr_auc_mean": 0.23339117629419234,
+      "pr_auc_std": 0.0045902404268120195
+    }
+  },
+  "xgboost": {
+    "feature_count": 146,
+    "metrics": {
+      "roc_auc_mean": 0.7663548862717845,
+      "roc_auc_std": 0.0022287165802400964,
+      "pr_auc_mean": 0.25272589038853754,
+      "pr_auc_std": 0.0029376474342151207
+    }
+  },
+  "delta_xgboost_minus_logistic": {
+    "roc_auc_mean": 0.010327897954044984,
+    "pr_auc_mean": 0.0193347140943452
+  }
+}
