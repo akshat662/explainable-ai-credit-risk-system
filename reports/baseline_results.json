@@ -1,13 +1,13 @@
 {
   "model": "LogisticRegression",
-  "feature_count": 146,
-  "numeric_feature_count": 130,
+  "feature_count": 147,
+  "numeric_feature_count": 131,
   "categorical_feature_count": 16,
   "metrics": {
-    "roc_auc_mean": 0.7560269883177395,
-    "roc_auc_std": 0.002289232030231527,
-    "pr_auc_mean": 0.23339117629419234,
-    "pr_auc_std": 0.0045902404268120195
+    "roc_auc_mean": 0.7542965652595381,
+    "roc_auc_std": 0.003915382385350283,
+    "pr_auc_mean": 0.23010597008563857,
+    "pr_auc_std": 0.0076389559249218615
   },
   "config": {
     "model_params": {

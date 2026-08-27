@@ -66,6 +66,7 @@ Generated from `features_clean` (post sentinel-cleaning, pre-imputation) in `src
 | bureau_total_loans | 14.3149 |
 | bureau_active_loans | 14.3149 |
 | bureau_closed_loans | 14.3149 |
+| bureau_had_negative_debt | 14.3149 |
 | bureau_total_overdue | 14.3149 |
 | bureau_avg_days_overdue | 14.3149 |
 | bureau_max_days_overdue | 14.3149 |
@@ -190,6 +191,7 @@ These categories have explicit treatment rules regardless of top-N rank (none cu
 | bureau_total_loans | 14.3149 | Keep NaN | Missing means the applicant has no bureau-reported credit history, not zero history. |
 | bureau_active_loans | 14.3149 | Keep NaN | Missing means the applicant has no bureau-reported credit history, not zero history. |
 | bureau_closed_loans | 14.3149 | Keep NaN | Missing means the applicant has no bureau-reported credit history, not zero history. |
+| bureau_had_negative_debt | 14.3149 | Keep NaN | Missing means the applicant has no bureau-reported credit history, not zero history. |
 | bureau_total_overdue | 14.3149 | Keep NaN | Missing means the applicant has no bureau-reported credit history, not zero history. |
 | bureau_avg_days_overdue | 14.3149 | Keep NaN | Missing means the applicant has no bureau-reported credit history, not zero history. |
 | bureau_max_days_overdue | 14.3149 | Keep NaN | Missing means the applicant has no bureau-reported credit history, not zero history. |
