@@ -219,3 +219,138 @@ XGBoost, or an explicit imputation step) — this is intentionally deferred
 to a later phase.
 
 ---
+
+## Decision: Convert the DAYS_EMPLOYED sentinel to NaN with an explicit indicator
+
+### Context:
+`DAYS_EMPLOYED` contains the value `365243` (~1000 years) for 55,374 of
+307,511 applicants (~18%) — confirmed to be almost entirely `Pensioner`
+(55,352) and `Unemployed` (22) applicants. This is Home Credit's known
+placeholder for "employment duration not applicable," not a measured value.
+
+### Choice:
+`clean_sentinel_values()` in `src/data_quality.py` replaces `365243` with
+`NULL` and adds a `days_employed_anomaly` (1/0) column recording where the
+sentinel was found, before any downstream ratio or aggregate touches
+`DAYS_EMPLOYED`.
+
+### Reasoning:
+- `365243` is not a real employment duration — treating it as a numeric
+  value would let it dominate any average, ratio, or model split involving
+  `DAYS_EMPLOYED` (e.g. it would appear as a multi-century outlier).
+  Converting it to `NULL` is the only way to prevent that distortion.
+- The fact that an applicant *had* the sentinel is itself informative (it
+  flags retirees/unemployed applicants, a segment with a different risk
+  profile) independent of the now-missing value — hence the indicator
+  column rather than silently dropping the information.
+- This must happen before any future employment-related ratio feature
+  (e.g. income per year employed), otherwise such a ratio would compute a
+  meaningless near-zero value against a 1000-year denominator instead of
+  correctly propagating `NULL`.
+
+### Alternatives considered:
+- **Leave the sentinel as a numeric value**: rejected — silently corrupts
+  any statistic or ratio computed over `DAYS_EMPLOYED`.
+- **Drop the indicator, keep only the NULL**: rejected — would discard a
+  segment-identifying signal (Pensioner/Unemployed) that costs nothing to
+  preserve.
+
+### Impact:
+Any feature or model built on `DAYS_EMPLOYED` after this phase must treat
+it as having genuine missingness, and can use `days_employed_anomaly` as a
+free, leakage-safe segment flag.
+
+---
+
+## Decision: Preserve missing values instead of imputing in Phase 3
+
+### Context:
+`reports/missing_values.md` profiles missingness across all ~148 features
+in `features_clean`. Missingness ranges from ~0% to ~70% (building/
+apartment descriptive columns are the most missing; `bureau_*`/`prev_*`
+engineered features are missing at 5-17% by construction, per
+[the Phase 2 LEFT JOIN decision](#decision-preserve-left-join-missing-values-instead-of-zero-filling)).
+
+### Choice:
+No imputation is performed anywhere in `src/data_quality.py`. The missing
+value report documents an intended *future* treatment per feature category
+(`EXT_SOURCE_*` → keep NaN, consider a missingness indicator; `bureau_*`/
+`prev_*` → keep NaN, since NaN means "no history" not "zero"; everything
+else → left unchanged for now) but does not act on it yet.
+
+### Reasoning:
+- The correct imputation strategy (mean/median fill, model-based, or
+  leaving NaN for a NaN-native model like XGBoost) is a modeling decision
+  that depends on which model family is chosen — deciding it now, before
+  Phase 4 modeling exists, would be premature and likely wrong for at
+  least one candidate model.
+- Some missingness here is not "missing data" in the usual sense at all —
+  `bureau_*`/`prev_*` NaNs encode "this applicant has no such history,"
+  a fact a model may want to use directly (e.g. via a NaN-aware split)
+  rather than have overwritten by an imputed value.
+- Committing to imputation before the holdout split existed would also
+  risk fitting an imputation statistic (e.g. a column mean) that
+  implicitly used holdout rows, contaminating the holdout before it's
+  even created — deferring imputation past the split avoids this entirely.
+
+### Alternatives considered:
+- **Simple mean/median imputation now**: rejected — irreversible
+  information loss (real vs. imputed values become indistinguishable) made
+  before any model has stated what it actually needs.
+
+### Impact:
+`dev.parquet`/`holdout.parquet` both still contain NaNs. Any Phase 4
+training code must either use a NaN-native model or add an explicit,
+dev-only-fitted imputation step.
+
+---
+
+## Decision: Create the dev/holdout split before any modeling, and lock it
+
+### Context:
+Phase 4 will involve model training, calibration, and threshold tuning —
+all of which can overfit to a dataset if the same data is used to both
+develop and evaluate a model. The project's goal is a *trustworthy*
+decision system, which requires an honest, untouched estimate of
+real-world performance.
+
+### Choice:
+`create_dev_holdout_split()` splits applicants 80/20 into
+`data/processed/dev.parquet` / `data/processed/holdout.parquet` using
+`sklearn.model_selection.train_test_split(stratify=TARGET, random_state=42)`,
+run once, in this phase — before any model exists. `validate_split()` hard-
+asserts the split is disjoint (`SK_ID_CURR` never in both), row-complete
+(`dev + holdout == total`), and target-balanced (default rate within 1
+percentage point between the two). Verified: dev default rate 8.0729%,
+holdout 8.0728%, and confirmed reproducible under the fixed `random_state`
+(identical `SK_ID_CURR` membership across repeated runs, independent of
+Parquet file byte-level metadata).
+
+### Reasoning:
+- Splitting before any model or feature-selection work exists is the only
+  way to guarantee the holdout wasn't (even implicitly) used to inform a
+  decision — the project's own rule ("never use holdout data for
+  decisions") is only enforceable if the holdout is locked before there's
+  anything to decide.
+- Only `SK_ID_CURR` + `TARGET` (2 of ~148 columns) are materialized into
+  pandas for `train_test_split`, since that's the minimum sklearn's API
+  needs; the full feature table is filtered and written by DuckDB directly,
+  keeping the DuckDB-first architecture for the actual data movement.
+- Stratifying on `TARGET` keeps the already-rare default class (~8%)
+  represented proportionally in both splits — an unstratified split risks
+  a holdout default rate different enough from dev to make evaluation
+  results misleading purely from sampling variance.
+
+### Alternatives considered:
+- **K-fold cross-validation only, no fixed holdout**: rejected — the
+  project needs one final, untouched number for reporting business
+  decisions, not just a cross-validation estimate that could still be
+  indirectly tuned against across many modeling iterations.
+
+### Impact:
+From this point forward, `holdout.parquet` must not be read by any
+exploratory, feature-selection, calibration, or threshold-tuning code —
+only by a final evaluation step once a model is fully decided. `dev.parquet`
+is the only file later phases should touch during development.
+
+---
