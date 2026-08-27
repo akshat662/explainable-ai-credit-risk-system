@@ -796,3 +796,136 @@ pattern: write its own `*_results.json`, then extend or regenerate
 comparison history accumulates rather than requiring manual reconciliation.
 
 ---
+
+## Decision: Probability calibration is required before this system makes decisions
+
+### Context:
+Phase 6 established that XGBoost *ranks* applicants by risk better than
+the logistic baseline (higher ROC-AUC/PR-AUC). Ranking quality alone does
+not mean the model's output can be read as an actual default probability.
+
+### Choice:
+Phase 7 explicitly separates "does the model rank well" (already answered)
+from "can the model's raw score be trusted as a probability" (this
+phase's question), via `src/calibrate_model.py`, before any business
+decision logic is built on top of it.
+
+### Reasoning:
+- This system's entire purpose is to convert a probability into a
+  business decision (a future phase). That conversion needs the number
+  itself to be meaningful — e.g. "this applicant has an 8% chance of
+  default" must actually mean roughly 8 in 100 similar applicants
+  default, not just "this applicant ranks higher-risk than that one."
+  ROC-AUC/PR-AUC are rank-based and provably invariant to any monotonic
+  transformation of the score (confirmed empirically below), so they
+  cannot detect whether the raw score is off by a consistent multiplicative
+  or additive factor.
+- Gradient-boosted trees are commonly, though not universally,
+  under/over-confident at the extremes even when their ranking is strong,
+  because the training objective optimizes ranking-adjacent loss, not
+  calibration directly.
+- In this project's case, the raw XGBoost score turned out to already be
+  reasonably close to calibrated (Brier 0.06745, visually near the
+  diagonal in `reports/calibration_curve.png`) — but this was verified,
+  not assumed, and isotonic regression still improved on it (Brier
+  0.06725). Skipping this phase would have meant shipping an assumption
+  instead of a measurement.
+
+### Alternatives considered:
+- **Skip calibration and use the raw XGBoost score directly for business
+  decisions**: rejected — even a small calibration gap compounds when the
+  probability feeds directly into an expected-loss calculation, which is
+  exactly what a future phase will do with this number.
+
+### Impact:
+Later phases (threshold/decision logic) should read probabilities from
+the calibrated model (isotonic — see `reports/calibration_results.json`),
+not the raw XGBoost score, unless a documented reason says otherwise.
+
+---
+
+## Decision: Calibration is fit and evaluated on out-of-fold predictions
+
+### Context:
+Calibration needs a training signal (raw score → observed outcome) to
+learn from. Fitting XGBoost once on all of `dev.parquet` and calibrating
+against its own training predictions was one option; generating
+out-of-fold (OOF) predictions via 5-fold CV was the other.
+
+### Choice:
+`generate_oof_predictions()` retrains Phase 6's exact XGBoost
+configuration once per fold and predicts only on that fold's held-out
+rows, so every row in `reports/oof_predictions.csv` was scored by a model
+that never saw it during training. Platt and isotonic are then fit on
+these OOF scores, not on in-sample predictions from a single
+fit-on-everything model.
+
+### Reasoning:
+- A model's predictions on its own training data are systematically
+  overconfident (it has partially memorized those rows), which would make
+  any calibration fit against them learn the wrong correction — a
+  calibrator trained to fix overconfidence that isn't actually present in
+  genuine unseen-data behavior.
+- OOF predictions are the same tool this project already trusts CV
+  metrics to come from (Phases 5-6) — using anything else here would mean
+  Phase 7 measures calibration against a different, less honest notion of
+  "unseen data" than the rest of the project uses for performance.
+- Reusing Phase 6's `MODEL_PARAMS`/`prepare_categoricals` unmodified (per
+  this phase's rule) keeps the OOF scores representative of the exact
+  model already benchmarked, rather than a subtly different one.
+
+### Alternatives considered:
+- **Calibrate on the same model's in-sample training predictions**:
+  rejected — would understate the true calibration gap by fitting against
+  optimistic, overconfident scores.
+
+### Impact:
+`reports/oof_predictions.csv` (SK_ID_CURR, TARGET, xgb_probability) is now
+the canonical honest-score artifact for this model; any future
+recalibration attempt should regenerate or reuse this file rather than
+scoring `dev.parquet` with a single fit-on-everything model.
+
+---
+
+## Decision: Brier score reported alongside ROC-AUC/PR-AUC for calibration
+
+### Context:
+Step 3 needed a way to actually tell the three methods (raw, Platt,
+isotonic) apart. Empirically here, ROC-AUC and PR-AUC came back
+effectively identical for raw (0.7664 / 0.2524) and Platt (0.7664 /
+0.2524) — expected, since Platt scaling is a strictly monotonic
+transform of a single input score and cannot change how it ranks
+applicants relative to each other. Isotonic showed only a marginal
+difference (0.7669 / 0.2479), attributable to tie-breaking from its
+step-function output rather than a real ranking change.
+
+### Choice:
+Brier score (`brier_score_loss`) is computed and reported for every
+method, alongside ROC-AUC/PR-AUC, in `reports/calibration_results.json`.
+
+### Reasoning:
+- Brier score is the mean squared error between predicted probability and
+  actual outcome — it is sensitive to the actual magnitude of the
+  predicted probability, not just its rank, which is precisely the
+  property ROC-AUC/PR-AUC lack for this phase's purpose.
+- This wasn't a hypothetical concern: it's the metric that revealed Platt
+  scaling actually made calibration slightly *worse* than the raw score in
+  this experiment (Brier 0.06850 vs. raw 0.06745), a finding ROC-AUC/PR-AUC
+  were structurally incapable of surfacing since they came back identical.
+  Isotonic was the only method that improved on raw (Brier 0.06725).
+
+### Alternatives considered:
+- **Rely on the calibration curve plot alone**: rejected as the sole
+  measure — a visual reliability diagram is useful context (kept, as
+  `reports/calibration_curve.png`) but doesn't give a single comparable
+  number for ranking the three methods against each other the way Brier
+  score does.
+
+### Impact:
+Method selection for calibration in this project is driven by Brier
+score, not ROC-AUC/PR-AUC (which are expected, by construction, to stay
+roughly flat across recalibration methods). Isotonic is the current best
+result on this basis and is the calibrated-probability source for future
+phases per the decision above.
+
+---
