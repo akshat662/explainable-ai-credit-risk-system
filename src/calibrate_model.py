@@ -83,6 +83,14 @@ def fit_calibrators(oof_df):
     calibrators fit on it. That carries a small optimism relative to a
     further, fully disjoint calibration-eval split; documented here as a
     known limitation of this phase's scope rather than assumed away.
+
+    Returns (predictions, models): predictions holds each method's OOF-set
+    scores (for this script's own metrics/plot); models holds the fitted
+    Platt/isotonic estimator objects themselves, so a caller scoring a
+    different set of raw probabilities later (e.g. holdout) can reuse the
+    exact same fitted calibration mapping via .predict()/.predict_proba(),
+    rather than refitting -- calibrators must be fit once, on dev-only
+    OOF scores, and then only ever applied elsewhere.
     """
     y = oof_df["TARGET"].values
     raw = oof_df["xgb_probability"].values
@@ -95,7 +103,9 @@ def fit_calibrators(oof_df):
     isotonic.fit(raw, y)
     isotonic_proba = isotonic.predict(raw)
 
-    return {"raw_xgb": raw, "platt": platt_proba, "isotonic": isotonic_proba}
+    predictions = {"raw_xgb": raw, "platt": platt_proba, "isotonic": isotonic_proba}
+    models = {"platt": platt, "isotonic": isotonic}
+    return predictions, models
 
 
 def evaluate_calibration(y, predictions):
@@ -139,7 +149,7 @@ def main():
     oof_df = generate_oof_predictions(df)
     save_oof_predictions(oof_df)
 
-    predictions = fit_calibrators(oof_df)
+    predictions, _models = fit_calibrators(oof_df)
     results = evaluate_calibration(oof_df["TARGET"].values, predictions)
 
     os.makedirs(os.path.dirname(RESULTS_PATH), exist_ok=True)

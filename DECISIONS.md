@@ -715,6 +715,12 @@ reflect a same-information comparison between the two model families.
 Any future model added to this project should also use the full 146-
 feature set unless there's a specific reason to restrict it.
 
+> **Superseded note (Phase 7.8):** the feature count above (146) was
+> accurate as of Phase 6. Phase 7.5 added `bureau_had_negative_debt`,
+> bringing the count to 147 — the current, authoritative figure is in
+> `reports/final_model_card.md`. The guidance to use the full feature set
+> still applies; just read "147" wherever "146" appears above and below.
+
 ---
 
 ## Decision: Hyperparameter tuning deferred past Phase 6
@@ -755,6 +761,13 @@ The Phase 6 result (PR-AUC 0.2527 vs. baseline's 0.2334) should be read as
 baseline" — a lower bound on what XGBoost can do, not its ceiling. A
 future tuning phase should be scoped explicitly once a model family is
 chosen to move forward with.
+
+> **Superseded note (Phase 7.8):** 0.2527 was XGBoost's PR-AUC as measured
+> in Phase 6, before the Phase 7.5 pipeline fixes (negative-debt clipping,
+> split determinism). The refreshed, current figure is PR-AUC 0.2499 ±
+> 0.0087 (ROC-AUC 0.7634 ± 0.0044) — see Phase 7.6's decision below and
+> `reports/final_model_card.md`. The qualitative conclusion ("untuned
+> nonlinear beats untuned linear") is unchanged.
 
 ---
 
@@ -899,6 +912,13 @@ applicants relative to each other. Isotonic showed only a marginal
 difference (0.7669 / 0.2479), attributable to tie-breaking from its
 step-function output rather than a real ranking change.
 
+> **Superseded note (Phase 7.8):** these dev-OOF figures were measured in
+> Phase 7, before the Phase 7.5 pipeline fixes. The pattern they illustrate
+> (ROC-AUC/PR-AUC ~flat across methods; Brier score is what differentiates
+> them) still holds on the corrected pipeline and on holdout — see
+> `reports/calibration_results.json` (refreshed) and
+> `reports/holdout_calibration_results.json` for current numbers.
+
 ### Choice:
 Brier score (`brier_score_loss`) is computed and reported for every
 method, alongside ROC-AUC/PR-AUC, in `reports/calibration_results.json`.
@@ -927,5 +947,372 @@ score, not ROC-AUC/PR-AUC (which are expected, by construction, to stay
 roughly flat across recalibration methods). Isotonic is the current best
 result on this basis and is the calibrated-probability source for future
 phases per the decision above.
+
+---
+
+## Decision: Negative bureau debt is clipped to 0, with a preserved indicator
+
+### Context:
+`reports/bureau_temporal_analysis.md` (Phase 4 follow-up) flagged 8,418
+negative `AMT_CREDIT_SUM_DEBT` values (0.49% of bureau rows) as an
+unexplained data-quality anomaly, deferred at the time rather than fixed.
+Re-verified here: 8,418 rows, affecting 5,886 of 305,811 bureau-covered
+applicants (1.92%), concentrated in `Active` loans (6,222 of 8,418), range
+-0.045 to -4,705,600.32.
+
+### Choice:
+`build_bureau_aggregates()` in `src/features.py` now clips negative
+`AMT_CREDIT_SUM_DEBT` values to 0 before summing into `bureau_total_debt`
+(via `CASE WHEN AMT_CREDIT_SUM_DEBT < 0 THEN 0 ELSE ... END`, which leaves
+genuine NULLs as NULL — only actual negative numbers are touched), and
+adds `bureau_had_negative_debt` (1 if any of an applicant's bureau records
+had negative debt, else 0; NULL only for applicants with no bureau
+history at all, matching every other `bureau_*` column's missingness
+convention).
+
+### Reasoning:
+- A negative outstanding debt has no documented meaning in the Home
+  Credit data dictionary, and the extreme tail (-4.7M) is far too large to
+  be plausibly explained as a simple overpayment/credit-balance case.
+  Left unclipped, `SUM(AMT_CREDIT_SUM_DEBT)` and `debt_income_ratio` would
+  be silently pulled downward by an unexplained anomaly for the 1.92% of
+  applicants affected.
+- Clipping to 0 (rather than, say, taking absolute value) is the more
+  conservative correction: it assumes "no evidence of negative debt below
+  zero" rather than actively asserting a specific alternate value, which
+  would be fabricating information the data doesn't support.
+- `bureau_had_negative_debt` exists because clipping is a lossy operation
+  — without a flag, the fact that a correction happened would disappear
+  entirely from the feature set, even though it may itself carry a
+  correlation-with-something-else signal (e.g. a particular reporting
+  source's data quality) independent of the corrected magnitude.
+
+### Alternatives considered:
+- **Leave negative debt as-is (status quo from Phase 4)**: rejected — a
+  "Model Reliability Cleanup" phase is exactly the point at which a known,
+  previously-deferred anomaly should be resolved rather than carried
+  forward again.
+- **Drop rows with negative debt**: rejected — would violate applicant
+  grain (one row per `SK_ID_CURR` is required) and discard the rest of an
+  otherwise-valid applicant's data over one anomalous bureau record.
+
+### Impact:
+`features_naive.parquet`/`features_filtered.parquet` now have 26
+engineered features (was 25). `bureau_total_debt` and `debt_income_ratio`
+values changed for the 5,886 affected applicants; every other engineered
+feature is untouched. This required rebuilding `dev.parquet`/
+`holdout.parquet` — see the split-stability fix below, which was
+discovered during that rebuild.
+
+---
+
+## Decision: Dev/holdout split must sort by SK_ID_CURR before splitting
+
+### Context:
+Rebuilding `features_naive.parquet` for the negative-debt fix, then
+rerunning `src/data_quality.py` unchanged, was expected to reproduce the
+same dev/holdout partition (same `random_state=42`, same applicant
+universe). Instead, 49,151 of 61,503 holdout applicants (80%) turned out
+to be *different* from the previous holdout — even though the same
+`SK_ID_CURR`'s `TARGET` value never changed (0 label mismatches, verified
+directly). A back-to-back rerun of `data_quality.py` against a single,
+unchanged `features_naive.parquet` reproduced its own split exactly (0
+diff), isolating the cause to something that changes when the *upstream*
+Parquet file is rewritten.
+
+### Choice:
+`create_dev_holdout_split()` now runs
+`SELECT SK_ID_CURR, TARGET FROM features_clean ORDER BY SK_ID_CURR`
+before calling `train_test_split`, instead of an unordered `SELECT`.
+
+### Reasoning:
+- `train_test_split`'s shuffle (even with a fixed `random_state`) operates
+  on row *position* in its input array, not on the `SK_ID_CURR` values
+  themselves. DuckDB does not guarantee a stable row-materialization order
+  for the same query across separate process runs — confirmed directly:
+  rebuilding `features_naive.parquet` after an unrelated column addition
+  changed the order `COPY ... TO parquet` happened to write rows in, which
+  silently fed `train_test_split` a differently-ordered input and produced
+  a different partition, despite every "reproducibility" input
+  (`random_state`, the SQL query text, the applicant universe) being
+  unchanged.
+  - Verified the fix: rebuilt `features_naive.parquet` a second time
+    (forcing another row-order change) and reran the now-`ORDER BY`'d
+    split — 0 holdout membership difference from the run immediately
+    before that rebuild.
+- This means the *original* Phase 3 dev/holdout split was never actually
+  a stable function of applicant identity — it was, unknowingly, a
+  function of an incidental Parquet-writing detail. Any future rebuild of
+  the upstream feature pipeline (for any reason, not just this one) could
+  have silently reshuffled which applicants are in holdout, without
+  changing a single line of `data_quality.py` or any label.
+- This is precisely the kind of bug a project claiming to keep holdout
+  "locked" and "untouched" cannot afford to have unexamined — the whole
+  point of a holdout is that it names a fixed, known set of applicants
+  over time; a set that silently changes on unrelated upstream rebuilds
+  defeats that purpose even if no single run looks wrong in isolation.
+
+### Alternatives considered:
+- **Sort by row content other than SK_ID_CURR (e.g. a hash)**: rejected —
+  `SK_ID_CURR` is already the canonical, immutable applicant identifier;
+  sorting by it is simpler and self-explanatory.
+- **Leave as-is, treat this rebuild's new split as the "real" one going
+  forward**: rejected — doesn't fix the underlying fragility, only
+  papers over this one instance of it.
+
+### Impact:
+`dev.parquet`/`holdout.parquet` membership changed as a side effect of
+this fix (in addition to the negative-debt feature correction) — this is
+a new, now-actually-stable partition, not the same one as before Phase
+7.5. Every downstream artifact evaluated against the old holdout
+(`baseline_results.json`, `xgboost_results.json`, `model_comparison.json`,
+Phase 7's original `calibration_results.json`) reflects the old,
+no-longer-current split and should be treated as superseded, not
+authoritative, until rerun (see Risks in the Phase 7.5 completion summary).
+
+---
+
+## Decision: Isotonic regression selected as the calibrated-probability source, validated on holdout
+
+### Context:
+Phase 7 selected isotonic regression based on dev-set out-of-fold (OOF)
+metrics alone. `src/evaluate_holdout_calibration.py` re-evaluates all
+three methods (raw XGBoost, Platt, isotonic) on `holdout.parquet` — read
+only for scoring, never for fitting anything — to check whether that
+selection actually holds on data the pipeline has never touched.
+
+### Choice:
+Isotonic regression remains the selected calibration method: holdout
+Brier score 0.066826 vs. raw 0.066840 vs. Platt 0.067816. Platt scaling is
+explicitly rejected for use in the decision engine.
+
+### Reasoning:
+- The isotonic-vs-raw advantage that looked clear on dev OOF (0.06742 vs.
+  0.06762, a 0.00020 gap) nearly disappeared on holdout (0.000014 gap).
+  This is reported honestly as a real finding, not smoothed over: it means
+  Phase 7's original conclusion was more confident than the evidence
+  actually supported, and the raw XGBoost score was already close to
+  calibrated on this dataset. Isotonic is still selected because it is
+  never worse than raw on either evaluation, not because it dramatically
+  outperforms it.
+- Platt scaling underperforming raw XGBoost is the one pattern that *does*
+  replicate: worse Brier score on both dev OOF (0.06860 vs. 0.06762) and
+  holdout (0.06782 vs. 0.06684), by a similar margin each time. A
+  regression that shows up consistently across two independent
+  evaluations is trustworthy in a way a single-evaluation result is not;
+  Platt scaling is excluded from the decision engine on this basis.
+- ROC-AUC/PR-AUC stayed effectively flat across all three methods on
+  holdout too (0.7713/0.2650 for raw and Platt, 0.7713/0.2585 for
+  isotonic) — reconfirming, on new data, that ranking metrics can't
+  distinguish these methods and Brier score is the metric that matters
+  for this decision.
+
+### Alternatives considered:
+- **Keep Phase 7's dev-OOF-only conclusion, skip holdout validation**:
+  rejected — this is precisely the gap Phase 7.5 exists to close; a
+  calibration choice that only looks good on the same sample it was
+  fit/compared on is not yet a validated choice.
+
+### Impact:
+**Isotonic-calibrated XGBoost probabilities are the final probability
+source for the decision engine.** Any future phase building business
+decision logic (thresholds, expected-loss calculations) on top of a
+default probability should read it from the isotonic calibrator applied
+to the full-dev-trained XGBoost model — the exact artifacts produced by
+`src/evaluate_holdout_calibration.py` — not from the raw XGBoost score,
+and not from Platt scaling.
+
+> **Superseded (Phase 7.8):** the "never worse than raw" observation above
+> was correct but incomplete — it didn't test whether isotonic's holdout
+> edge (0.066826 vs. 0.066840) was distinguishable from noise. A
+> 1,000-iteration bootstrap found the 95% CI for the difference spans 0,
+> i.e. it isn't. **Raw XGBoost, uncalibrated, is now the final probability
+> source** — see the two Phase 7.8 decisions below. Platt scaling's
+> exclusion is unaffected by this reversal.
+
+---
+
+## Decision: Baseline/XGBoost benchmarks refreshed post-Phase-7.5, superseding prior numbers
+
+### Context:
+`reports/baseline_results.json`, `reports/xgboost_results.json`, and
+`reports/model_comparison.json` were flagged as stale in Phase 7.5's Risks
+section — they were computed against the pre-fix `dev.parquet` (negative
+bureau debt unclipped, and a dev/holdout split that wasn't actually a
+stable function of applicant identity — see the two Phase 7.5 decisions
+above). Phase 7.6 reruns `src/train_baseline.py` and `src/train_xgboost.py`
+unchanged against the corrected `dev.parquet` to close that gap.
+
+### Choice:
+All three files are regenerated with no code or hyperparameter changes to
+either training script. New results: logistic ROC-AUC 0.7543 / PR-AUC
+0.2301; XGBoost ROC-AUC 0.7634 / PR-AUC 0.2499; XGBoost still leads on
+both metrics (+0.0091 ROC-AUC, +0.0198 PR-AUC).
+
+### Reasoning:
+- These are benchmark numbers this project's future model-selection
+  decisions are meant to be measured against
+  ([[decision-every-candidate-model-is-compared-against-the-baseline-not-evaluated-in-isolation]]).
+  Leaving them computed against a since-corrected, since-reshuffled
+  dataset would make every future "is this an improvement" comparison
+  reference the wrong ground truth.
+- No model or preprocessing logic changed — only the input data
+  (`dev.parquet`) did, via Phase 7.5's fixes. Rerunning the exact same
+  scripts is sufficient; no new engineering decision was required here
+  beyond acknowledging which numbers are now authoritative.
+
+### Alternatives considered:
+- **Keep the old numbers, note the discrepancy in prose only**: rejected
+  — the files are the artifacts other phases and reviewers actually read;
+  leaving them stale invites exactly the kind of silent staleness this
+  project's phased, documented approach exists to avoid.
+
+### Impact:
+The pre-Phase-7.5 versions of these three files are superseded and should
+not be cited going forward. Any phase referencing "the baseline" or "the
+XGBoost benchmark" from this point on means these Phase 7.6 numbers.
+
+---
+
+## Decision: Model pipeline frozen and captured in reports/final_model_card.md
+
+### Context:
+By Phase 7.6, every stage — feature engineering (with the negative-debt
+fix), the dev/holdout split (with the determinism fix), both benchmarked
+models, and holdout-validated calibration — had been independently
+verified. Phase 7.7 re-verified all five consistency properties one more
+time (feature count, split determinism, XGBoost parameters, calibrator
+fitting scope, holdout-usage scope) with no code changes, and all five
+held.
+
+### Choice:
+The pipeline as it exists at this point — 147 features, the
+`SK_ID_CURR`-ordered deterministic 80/20 split, `XGBClassifier` with the
+Phase 6 hyperparameters, isotonic-calibrated probabilities from a
+full-dev-trained model — is declared frozen and documented in
+`reports/final_model_card.md`.
+
+### Reasoning:
+- A "final model card" is only meaningful if it describes something that
+  isn't still shifting under it. Freezing gives every future phase
+  (SHAP explanations, business-decision thresholds, Streamlit deployment)
+  a fixed, named reference to build on, rather than an implicit
+  assumption that "the current pipeline" means whatever it happens to be
+  when that phase starts.
+- Re-verifying all five properties immediately before freezing (rather
+  than trusting Phase 7.5/7.6's prior verifications alone) is what makes
+  this freeze trustworthy rather than aspirational — each check was
+  re-run against the actual current code and data, not recalled from
+  memory of having checked before.
+
+### Alternatives considered:
+- **No formal freeze, treat the pipeline as "done for now" informally**:
+  rejected — this project's whole approach has been to make decisions
+  explicit and re-checkable; an informal, undocumented freeze point would
+  break that pattern right before the phases that most need a stable
+  foundation (explainability, business decisions) begin.
+
+### Impact:
+Any future change to feature engineering, the split, model
+hyperparameters, or the calibration method is now a deviation from a
+named, documented baseline (`reports/final_model_card.md`) and should be
+justified and re-recorded in DECISIONS.md as such, not made silently.
+
+---
+
+## Decision: Bootstrap significance test added before finalizing calibration choice
+
+### Context:
+Phase 7.5 selected isotonic regression over raw XGBoost based on a single
+holdout Brier score comparison (0.066826 vs. 0.066840 — a 0.000014 gap).
+A single point estimate cannot distinguish a real effect from sampling
+noise at that magnitude.
+
+### Choice:
+`src/bootstrap_calibration_comparison.py` reproduces the frozen holdout
+predictions (same `MODEL_PARAMS`, same dev-fit final model, same dev-OOF-
+fit isotonic calibrator — verified byte-identical to Phase 7.5's saved
+`brier_score` values before proceeding, diff = 0.00e+00 for both methods)
+and runs a 1,000-iteration paired bootstrap (`random_state=42`) over
+Brier(raw) − Brier(isotonic), reporting the mean difference and a 95% CI.
+
+### Reasoning:
+- Paired resampling (the same bootstrap row indices applied to both raw
+  and isotonic each iteration) isolates the *difference* between the two
+  methods on identical resampled applicants, rather than treating two
+  independently-resampled Brier scores as if their difference were
+  itself directly comparable — the right design for "is A better than B,"
+  as opposed to "what is A's Brier score."
+- Verifying the reproduced predictions against Phase 7.5's saved results
+  before bootstrapping was necessary, not optional: this project's
+  earlier discovery of unstable row ordering (the split-determinism bug)
+  is exactly the kind of failure mode that would silently corrupt a
+  bootstrap built on freshly reproduced data — checking first turns
+  "assume reproducibility" into "confirm reproducibility."
+- 1,000 iterations at a fixed seed makes the CI itself reproducible run to
+  run, consistent with every other stochastic step in this project.
+
+### Alternatives considered:
+- **Keep the Phase 7.5 point-estimate decision as final**: rejected — a
+  0.000014 Brier gap on 61,503 holdout rows is exactly the kind of result
+  that demands a significance check before being used to justify adding a
+  calibration layer to production.
+
+### Impact:
+`reports/calibration_bootstrap_results.json` is now the evidentiary basis
+for the calibration decision below, superseding Phase 7.5's point-estimate
+justification for isotonic.
+
+---
+
+## Decision: Raw XGBoost selected as the final production probability, superseding isotonic
+
+### Context:
+The Phase 7.8 bootstrap (above) found the Brier(raw) − Brier(isotonic)
+95% CI to be **[-6.81e-05, +1.03e-04]** — an interval spanning 0. The
+isotonic advantage Phase 7.5 selected on is not statistically
+distinguishable from noise at this sample size.
+
+### Choice:
+**Raw, uncalibrated XGBoost probabilities are the final production
+probability source**, reversing Phase 7.5's selection of isotonic
+regression. Platt scaling remains excluded (unaffected by this reversal —
+see below).
+
+### Reasoning:
+- When two options perform statistically indistinguishably, the simpler
+  one should win: raw XGBoost requires no additional fitted object (no
+  isotonic calibrator to version, validate, or explain alongside the
+  model), which matters directly for a system whose stated goal is
+  trustworthiness and explainability, not marginal metric optimization.
+  This is the same "don't add unnecessary complexity" principle this
+  project has applied to code throughout, now applied to a modeling
+  choice.
+- This is not a rejection of calibration as a concept — it's a finding
+  specific to this dataset/model: the raw XGBoost score here already
+  turned out to be close to calibrated (established in Phase 7's
+  reliability diagram), so there wasn't a real calibration gap for
+  isotonic to close, and the bootstrap confirms that directly rather than
+  leaving it as a visual impression.
+- Platt scaling remains excluded independent of this reversal: it
+  underperformed raw XGBoost in *both* the dev-OOF and holdout point-
+  estimate evaluations, a pattern that replicated across two independent
+  looks at the data even without a bootstrap test — a materially
+  different evidentiary situation than the isotonic-vs-raw comparison,
+  which only ever had one point estimate per evaluation and turned out to
+  be within noise.
+
+### Alternatives considered:
+- **Keep isotonic anyway, since it's "never worse"**: rejected — "never
+  worse, statistically indistinguishable" is not a reason to prefer the
+  more complex option; it's precisely the condition under which the
+  simpler option should be preferred.
+
+### Impact:
+`reports/final_model_card.md`'s "Calibration method" section now names
+raw XGBoost as the production probability source. Any future phase
+building business-decision logic (thresholds, expected-loss calculations,
+SHAP explanations) on top of a default probability should use the raw
+XGBoost score directly — not an isotonic-calibrated one.
 
 ---

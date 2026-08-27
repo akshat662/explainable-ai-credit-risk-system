@@ -1,0 +1,25 @@
+{
+  "bootstrap": {
+    "n_iterations": 1000,
+    "random_state": 42,
+    "mean_difference_raw_minus_isotonic": 1.4544908633700241e-05,
+    "ci_2_5_pct": -6.814876880485883e-05,
+    "ci_97_5_pct": 0.00010270256993484619,
+    "interpretation": "NOT statistically meaningful: the 95% bootstrap CI for Brier(raw) - Brier(isotonic) includes 0, so the observed point-estimate improvement is indistinguishable from sampling noise at this sample size."
+  },
+  "brier_comparison": {
+    "constant_predictor": {
+      "p": 0.08072908198107379,
+      "brier_score": 0.07421079663022367,
+      "note": "p = dev.parquet TARGET mean; never derived from holdout"
+    },
+    "raw_xgb": {
+      "brier_score": 0.06684001535177231,
+      "relative_improvement_vs_constant_pct": 9.932222281857953
+    },
+    "isotonic": {
+      "brier_score": 0.0668261579998746,
+      "relative_improvement_vs_constant_pct": 9.950895241220941
+    }
+  }
+}

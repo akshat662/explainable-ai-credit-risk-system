@@ -101,6 +101,20 @@ def build_bureau_aggregates(con, time_filtered=False):
 
     time_filtered=True restricts to DAYS_CREDIT <= 0 (loans that had
     already originated as of the current application) before aggregating.
+
+    AMT_CREDIT_SUM_DEBT contains 8,418 negative values (0.49% of all
+    bureau rows, affecting 5,886 of 305,811 bureau-covered applicants) --
+    confirmed via reports/bureau_temporal_analysis.md and re-verified here.
+    A negative outstanding debt is not explained by anything in the data
+    dictionary (unlike, say, a documented "credit balance" semantic) and
+    is concentrated in Active loans (6,222 of 8,418), with a long tail
+    down to -4.7M -- too extreme and unexplained to trust as a genuine
+    negative liability. bureau_total_debt clips these to 0 (a debt of "at
+    least zero" is the conservative, defensible read), while
+    bureau_had_negative_debt preserves the fact that clipping happened,
+    since it may itself be a useful signal (e.g. a data-quality artifact
+    correlated with a particular reporting source) independent of the
+    now-corrected magnitude.
     """
     where_clause = "WHERE DAYS_CREDIT <= 0" if time_filtered else ""
     con.execute(
@@ -114,7 +128,8 @@ def build_bureau_aggregates(con, time_filtered=False):
             AVG(AMT_CREDIT_SUM) AS bureau_avg_credit,
             MAX(AMT_CREDIT_SUM) AS bureau_max_credit,
             SUM(AMT_CREDIT_SUM) AS bureau_total_credit,
-            SUM(AMT_CREDIT_SUM_DEBT) AS bureau_total_debt,
+            SUM(CASE WHEN AMT_CREDIT_SUM_DEBT < 0 THEN 0 ELSE AMT_CREDIT_SUM_DEBT END) AS bureau_total_debt,
+            MAX(CASE WHEN AMT_CREDIT_SUM_DEBT < 0 THEN 1 ELSE 0 END) AS bureau_had_negative_debt,
             SUM(AMT_CREDIT_SUM_OVERDUE) AS bureau_total_overdue,
             AVG(CREDIT_DAY_OVERDUE) AS bureau_avg_days_overdue,
             MAX(CREDIT_DAY_OVERDUE) AS bureau_max_days_overdue,
@@ -183,6 +198,7 @@ def build_applicant_features(con):
             b.bureau_max_credit,
             b.bureau_total_credit,
             b.bureau_total_debt,
+            b.bureau_had_negative_debt,
             b.bureau_total_overdue,
             b.bureau_avg_days_overdue,
             b.bureau_max_days_overdue,

@@ -192,8 +192,17 @@ def create_dev_holdout_split(con, holdout_fraction=HOLDOUT_FRACTION, random_stat
     pandas — just enough for train_test_split's API — then registered back
     with DuckDB so the full feature table is filtered and written to
     Parquet without ever loading it into Python memory.
+
+    ORDER BY SK_ID_CURR is required, not cosmetic: train_test_split's
+    shuffle operates on row *position*, not on SK_ID_CURR values. DuckDB
+    does not guarantee a stable row order for the same query across
+    separate process runs (verified directly -- rebuilding
+    features_naive.parquet after an unrelated column addition changed the
+    materialized row order), so without an explicit deterministic sort
+    here, re-running the upstream feature pipeline could silently reshuffle
+    which applicants land in dev vs. holdout even with random_state fixed.
     """
-    ids = con.execute("SELECT SK_ID_CURR, TARGET FROM features_clean").fetchdf()
+    ids = con.execute("SELECT SK_ID_CURR, TARGET FROM features_clean ORDER BY SK_ID_CURR").fetchdf()
 
     dev_ids, holdout_ids = train_test_split(
         ids,
