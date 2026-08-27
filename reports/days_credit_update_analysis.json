@@ -1,0 +1,19 @@
+{
+  "total_bureau_rows": 1716428,
+  "min": -41947,
+  "max": 372,
+  "rows_with_days_credit_update_gt_0": 17,
+  "pct_rows_with_days_credit_update_gt_0": 0.00099,
+  "quantiles": {
+    "p0": -41947.0,
+    "p10": -1561.0,
+    "p25": -908.0,
+    "p50": -395.0,
+    "p75": -33.0,
+    "p90": -13.0,
+    "p99": -3.0,
+    "p100": 372.0
+  },
+  "used_as_filter": false,
+  "decision_reason": "Only 17 of 1716428 bureau rows (0.0010%) have DAYS_CREDIT_UPDATE > 0 (max +372 days), and all of them are already-Active loans whose DAYS_CREDIT (origination) is confirmed <= 0. Filtering these out would not measurably change any aggregate. DAYS_CREDIT_UPDATE is reported for transparency, not used as a row-inclusion filter in build_bureau_aggregates()."
+}

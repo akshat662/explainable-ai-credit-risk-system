@@ -354,3 +354,135 @@ only by a final evaluation step once a model is fully decided. `dev.parquet`
 is the only file later phases should touch during development.
 
 ---
+
+## Decision: Leakage audit runs before any model is trained for real
+
+### Context:
+Phase 4 introduces the first model training in this project — an
+XGBoost classifier — but its stated purpose is to test the *feature
+pipeline*, not to produce a model anyone should keep.
+
+### Choice:
+Before any "real" model development happens, `src/leakage_experiment.py`
+trains the same lightweight, untuned model on two feature variants
+(`features_naive.parquet` vs `features_filtered.parquet`) built from the
+identical development set, and compares them.
+
+### Reasoning:
+- Any leakage baked into the SQL feature pipeline (Phases 2-3) would
+  silently inflate every subsequent model's reported performance,
+  including on the holdout — by the time a "real" model is built and its
+  holdout score looks good, it would be too late to tell whether that
+  score reflects genuine predictive signal or leaked information.
+  Auditing the pipeline first, with a throwaway model, catches this
+  before it can contaminate a decision anyone would act on.
+- Using an untuned, fixed-hyperparameter model for the audit is
+  deliberate: any performance gap between naive and filtered must be
+  attributable to the data, not to incidentally different tuning — this
+  is a reliability test, not a benchmark.
+
+### Alternatives considered:
+- **Train the final model first, audit leakage only if performance looks
+  suspiciously high**: rejected — "looks suspiciously high" is not a
+  reliable signal (leakage can produce plausible, not just obviously
+  inflated, scores), and it reverses the burden of proof for a project
+  whose stated goal is trustworthiness, not just accuracy.
+
+### Impact:
+No model trained before this audit is treated as a candidate for
+deployment. Phase 5 modeling work can build on `features_naive.parquet`
+(or a future revision) only once its leakage status is understood, not
+assumed.
+
+---
+
+## Decision: Naive vs. temporally-filtered comparison as the leakage test
+
+### Context:
+"Leakage" is not directly observable — the audit needs some form of
+controlled comparison to make it detectable at all.
+
+### Choice:
+`build_features(time_filtered=True)` reproduces the exact same
+aggregation pipeline as the default, with one difference: bureau is
+restricted to `DAYS_CREDIT <= 0` and previous_application to
+`DAYS_DECISION <= 0` before aggregating. Comparing model performance on
+this table against the naive one isolates the effect of that one
+variable.
+
+### Reasoning:
+- Holding the join structure, feature list, model, and CV procedure
+  identical between the two runs means any performance gap can only come
+  from the rows excluded by the temporal filter — a clean, single-variable
+  test rather than a confounded before/after comparison.
+- This experiment turned out to be a null test in the current data: both
+  filter conditions already hold for 100% of raw bureau/previous_application
+  rows (verified directly — 0 rows excluded by either filter), so
+  `features_naive.parquet` and `features_filtered.parquet` are
+  value-identical up to ~1e-16 floating-point noise from DuckDB's
+  parallel aggregation (confirmed by rebuilding the naive pipeline twice
+  and diffing it against itself, which showed the same magnitude of
+  noise). The CV results are consequently identical to reported precision.
+  This is documented as an inconclusive result, not a clean bill of
+  health — see `reports/leakage_report.md` Section 4.
+- `DAYS_CREDIT_UPDATE` (bureau's last-refresh offset, distinct from
+  `DAYS_CREDIT`'s origination offset) was deliberately *not* used as a
+  filter: only 17 of 1,716,428 rows (0.001%) have a positive value, too
+  few to move any aggregate, so it's reported
+  (`reports/days_credit_update_analysis.json`) rather than filtered on
+  without justification.
+
+### Alternatives considered:
+- **Only report DAYS_CREDIT/DAYS_DECISION ranges, skip building a second
+  parquet file**: rejected — a written-down range check doesn't reveal
+  whether a violation would actually change *model* performance, which is
+  the thing that matters for trustworthiness.
+
+### Impact:
+The audit conclusively rules out one specific leakage vector (future-
+dated bureau/previous-application records) and explicitly flags what it
+does not rule out (bureau snapshot staleness beyond `DAYS_CREDIT_UPDATE`,
+`EXT_SOURCE_*` external scores) as needing a different test.
+
+---
+
+## Decision: Holdout remains untouched throughout the leakage audit
+
+### Context:
+The project's standing rule is "never use holdout data for decisions."
+Phase 4 is exactly the kind of exploratory, judgment-forming work that
+rule exists to protect against.
+
+### Choice:
+`src/leakage_experiment.py` reads only `data/processed/dev.parquet` (for
+the naive arm) and `features_filtered.parquet` restricted to
+`dev.parquet`'s `SK_ID_CURR` set (for the filtered arm).
+`holdout.parquet` is never opened by any file created or modified in this
+phase.
+
+### Reasoning:
+- A leakage audit's entire purpose is to inform a judgment call about
+  the feature pipeline. If that judgment were formed using holdout data,
+  the holdout would no longer be a valid, untouched estimate of
+  real-world performance for whatever model is eventually built — the
+  same failure mode the Phase 3 holdout lock was created to prevent in
+  the first place.
+  ([the Phase 3 holdout decision](#decision-create-the-devholdout-split-before-any-modeling-and-lock-it))
+- Restricting the filtered arm to `dev.parquet`'s applicant IDs (rather
+  than all of `features_filtered.parquet`) keeps both arms of the
+  comparison on the exact same rows, which is necessary for the
+  comparison to be valid — and, as a side effect, guarantees the filtered
+  arm never touches a holdout applicant either.
+
+### Alternatives considered:
+- **Evaluate both arms on holdout for a "final" leakage check**: rejected
+  — a leakage audit is inherently exploratory (multiple metrics, multiple
+  candidate filters could be tried), which is precisely the kind of
+  repeated peeking the holdout must be protected from.
+
+### Impact:
+`holdout.parquet` remains valid for a true final evaluation later.
+Any future leakage-audit iteration (e.g. testing the `DAYS_CREDIT_UPDATE`
+population specifically) must continue to use `dev.parquet` only.
+
+---

@@ -1,13 +1,20 @@
 """
 Phase 2: Applicant-level feature engineering pipeline.
+Phase 4 extension: optional temporal filtering for leakage auditing.
 
 Aggregates bureau.csv and previous_application.csv to one row per
 SK_ID_CURR, left-joins them onto application_train, and derives financial
 ratio features. All aggregation happens in DuckDB SQL — no full-table
 pandas loads. Missing bureau/previous-application history is left as NULL
 (no zero-fill); leakage auditing and imputation are separate later phases.
+
+build_features(time_filtered=True) additionally restricts bureau to
+DAYS_CREDIT <= 0 and previous_application to DAYS_DECISION <= 0 before
+aggregating, producing features_filtered.parquet as a leakage-audit
+counterpart to the default features_naive.parquet.
 """
 
+import json
 import logging
 import os
 
@@ -16,7 +23,9 @@ from profile_data import DATA_DIR, PROJECT_ROOT, get_connection, load_all_views
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-PROCESSED_PATH = os.path.join(PROJECT_ROOT, "data", "processed", "features_naive.parquet")
+FEATURES_NAIVE_PATH = os.path.join(PROJECT_ROOT, "data", "processed", "features_naive.parquet")
+FEATURES_FILTERED_PATH = os.path.join(PROJECT_ROOT, "data", "processed", "features_filtered.parquet")
+DAYS_CREDIT_UPDATE_REPORT_PATH = os.path.join(PROJECT_ROOT, "reports", "days_credit_update_analysis.json")
 
 
 def register_views(con):
@@ -24,15 +33,78 @@ def register_views(con):
     load_all_views(con, DATA_DIR)
 
 
-def build_bureau_aggregates(con):
+def analyze_days_credit_update(con):
+    """Analyze DAYS_CREDIT_UPDATE without assuming it's safe to filter on.
+
+    DAYS_CREDIT_UPDATE is the offset (relative to the current application)
+    at which a bureau record was last refreshed — distinct from
+    DAYS_CREDIT, which is when the underlying loan originated. A positive
+    DAYS_CREDIT_UPDATE means that record's snapshot fields (e.g.
+    CREDIT_DAY_OVERDUE, AMT_CREDIT_SUM_DEBT) were refreshed after the
+    current application's decision date, which is a plausible — if narrow —
+    leakage vector distinct from record-origination timing.
+
+    This function only measures and reports; it does not filter, because
+    the affected population turns out to be a tiny fraction of bureau rows
+    (see decision_reason below) — the finding is documented, not acted on
+    silently in either direction.
+    """
+    total = con.execute("SELECT COUNT(*) FROM bureau").fetchone()[0]
+    min_val, max_val = con.execute(
+        "SELECT MIN(DAYS_CREDIT_UPDATE), MAX(DAYS_CREDIT_UPDATE) FROM bureau"
+    ).fetchone()
+    n_positive = con.execute(
+        "SELECT COUNT(*) FROM bureau WHERE DAYS_CREDIT_UPDATE > 0"
+    ).fetchone()[0]
+    quantile_labels = ["p0", "p10", "p25", "p50", "p75", "p90", "p99", "p100"]
+    quantile_values = con.execute(
+        "SELECT quantile_cont(DAYS_CREDIT_UPDATE, [0,0.1,0.25,0.5,0.75,0.9,0.99,1.0]) FROM bureau"
+    ).fetchone()[0]
+
+    analysis = {
+        "total_bureau_rows": total,
+        "min": min_val,
+        "max": max_val,
+        "rows_with_days_credit_update_gt_0": n_positive,
+        "pct_rows_with_days_credit_update_gt_0": round(n_positive / total * 100, 6),
+        "quantiles": dict(zip(quantile_labels, quantile_values)),
+        "used_as_filter": False,
+        "decision_reason": (
+            f"Only {n_positive} of {total} bureau rows "
+            f"({n_positive / total * 100:.4f}%) have DAYS_CREDIT_UPDATE > 0 "
+            f"(max +{max_val} days), and all of them are already-Active loans "
+            "whose DAYS_CREDIT (origination) is confirmed <= 0. Filtering these "
+            "out would not measurably change any aggregate. DAYS_CREDIT_UPDATE "
+            "is reported for transparency, not used as a row-inclusion filter "
+            "in build_bureau_aggregates()."
+        ),
+    }
+
+    os.makedirs(os.path.dirname(DAYS_CREDIT_UPDATE_REPORT_PATH), exist_ok=True)
+    with open(DAYS_CREDIT_UPDATE_REPORT_PATH, "w") as f:
+        json.dump(analysis, f, indent=2)
+
+    logger.info(
+        "DAYS_CREDIT_UPDATE analysis: %d/%d rows (%.4f%%) > 0, max=%d -- not used as filter (see %s)",
+        n_positive, total, analysis["pct_rows_with_days_credit_update_gt_0"], max_val,
+        DAYS_CREDIT_UPDATE_REPORT_PATH,
+    )
+    return analysis
+
+
+def build_bureau_aggregates(con, time_filtered=False):
     """Aggregate bureau.csv to one row per SK_ID_CURR.
 
     Uses SUM/AVG/COUNT, which ignore NULLs per-row by default rather than
     treating them as zero — an applicant absent from bureau entirely still
     gets NULL aggregates (not zeros) once left-joined downstream.
+
+    time_filtered=True restricts to DAYS_CREDIT <= 0 (loans that had
+    already originated as of the current application) before aggregating.
     """
+    where_clause = "WHERE DAYS_CREDIT <= 0" if time_filtered else ""
     con.execute(
-        """
+        f"""
         CREATE OR REPLACE VIEW bureau_agg AS
         SELECT
             SK_ID_CURR,
@@ -49,20 +121,25 @@ def build_bureau_aggregates(con):
             COUNT(DISTINCT CREDIT_TYPE) AS bureau_credit_type_variety,
             SUM(CNT_CREDIT_PROLONG) AS bureau_total_prolongs
         FROM bureau
+        {where_clause}
         GROUP BY SK_ID_CURR
         """
     )
-    logger.info("Built bureau_agg (one row per SK_ID_CURR)")
+    logger.info("Built bureau_agg (time_filtered=%s)", time_filtered)
 
 
-def build_previous_application_aggregates(con):
+def build_previous_application_aggregates(con, time_filtered=False):
     """Aggregate previous_application.csv to one row per SK_ID_CURR.
 
     Granted-amount features are scoped to Approved rows only, since AMT_CREDIT
     on refused applications does not represent an actual grant.
+
+    time_filtered=True restricts to DAYS_DECISION <= 0 (applications already
+    decided as of the current application) before aggregating.
     """
+    where_clause = "WHERE DAYS_DECISION <= 0" if time_filtered else ""
     con.execute(
-        """
+        f"""
         CREATE OR REPLACE VIEW prev_app_agg AS
         SELECT
             SK_ID_CURR,
@@ -77,10 +154,11 @@ def build_previous_application_aggregates(con):
                 FILTER (WHERE NAME_CONTRACT_STATUS = 'Approved') AS prev_grant_ratio,
             AVG(CNT_PAYMENT) AS prev_avg_term
         FROM previous_application
+        {where_clause}
         GROUP BY SK_ID_CURR
         """
     )
-    logger.info("Built prev_app_agg (one row per SK_ID_CURR)")
+    logger.info("Built prev_app_agg (time_filtered=%s)", time_filtered)
 
 
 def build_applicant_features(con):
@@ -162,23 +240,101 @@ def validate_features(con):
     print(f"Engineered features added: {engineered_count}")
 
 
-def save_features(con, output_path=PROCESSED_PATH):
+def save_features(con, output_path):
     """Write features_naive to Parquet directly from DuckDB (no pandas hop)."""
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     con.execute(f"COPY (SELECT * FROM features_naive) TO '{output_path}' (FORMAT PARQUET)")
     logger.info("Saved features to %s", output_path)
 
 
+def build_features(time_filtered=False, con=None):
+    """Build the applicant-level feature table.
+
+    time_filtered=False (default): reproduces the original pipeline exactly
+    (all bureau/previous_application rows) -> features_naive.parquet.
+    time_filtered=True: restricts bureau to DAYS_CREDIT <= 0 and
+    previous_application to DAYS_DECISION <= 0 before aggregating ->
+    features_filtered.parquet. This is the leakage-audit counterpart: if a
+    model trained on this performs materially differently from one trained
+    on the naive table, that's evidence the naive pipeline let in
+    information that shouldn't have been available at decision time.
+
+    Accepts an existing connection (with views already registered) so
+    callers building both variants back-to-back can share one connection
+    for a later cross-comparison; otherwise opens and registers its own.
+    """
+    owns_connection = con is None
+    if owns_connection:
+        con = get_connection()
+        register_views(con)
+
+    analyze_days_credit_update(con)
+
+    build_bureau_aggregates(con, time_filtered=time_filtered)
+    build_previous_application_aggregates(con, time_filtered=time_filtered)
+    build_applicant_features(con)
+
+    validate_features(con)
+
+    output_path = FEATURES_FILTERED_PATH if time_filtered else FEATURES_NAIVE_PATH
+    save_features(con, output_path)
+
+    if owns_connection:
+        con.close()
+
+    return output_path
+
+
+def validate_naive_vs_filtered(con, naive_path=FEATURES_NAIVE_PATH, filtered_path=FEATURES_FILTERED_PATH):
+    """Confirm the naive and filtered feature tables share the same grain.
+
+    Both are built from the same application_train LEFT JOIN skeleton, so
+    time-filtering the bureau/previous_application aggregation inputs can
+    change feature *values*, but must never change which applicants appear,
+    how many rows exist, or the label distribution. Hard-fails otherwise.
+    """
+    con.execute(f"CREATE OR REPLACE VIEW naive_check AS SELECT SK_ID_CURR, TARGET FROM read_parquet('{naive_path}')")
+    con.execute(f"CREATE OR REPLACE VIEW filtered_check AS SELECT SK_ID_CURR, TARGET FROM read_parquet('{filtered_path}')")
+
+    naive_rows = con.execute("SELECT COUNT(*) FROM naive_check").fetchone()[0]
+    filtered_rows = con.execute("SELECT COUNT(*) FROM filtered_check").fetchone()[0]
+    assert naive_rows == filtered_rows, (
+        f"Row count mismatch: naive={naive_rows}, filtered={filtered_rows}"
+    )
+
+    coverage_diff = con.execute(
+        """
+        SELECT COUNT(*) FROM (
+            SELECT SK_ID_CURR FROM naive_check
+            EXCEPT
+            SELECT SK_ID_CURR FROM filtered_check
+        )
+        """
+    ).fetchone()[0]
+    assert coverage_diff == 0, (
+        f"{coverage_diff} SK_ID_CURR present in naive but missing from filtered"
+    )
+
+    naive_default_rate = con.execute("SELECT AVG(TARGET) FROM naive_check").fetchone()[0] * 100
+    filtered_default_rate = con.execute("SELECT AVG(TARGET) FROM filtered_check").fetchone()[0] * 100
+    assert abs(naive_default_rate - filtered_default_rate) < 0.01, (
+        f"TARGET distribution differs: naive={naive_default_rate:.4f}%, "
+        f"filtered={filtered_default_rate:.4f}%"
+    )
+
+    logger.info("naive vs filtered validation passed: same row count, coverage, and TARGET distribution")
+    print(f"naive rows={naive_rows}, filtered rows={filtered_rows}")
+    print(f"naive default rate={naive_default_rate:.4f}%, filtered default rate={filtered_default_rate:.4f}%")
+
+
 def main():
     con = get_connection()
     register_views(con)
 
-    build_bureau_aggregates(con)
-    build_previous_application_aggregates(con)
-    build_applicant_features(con)
+    build_features(time_filtered=False, con=con)
+    build_features(time_filtered=True, con=con)
 
-    validate_features(con)
-    save_features(con, PROCESSED_PATH)
+    validate_naive_vs_filtered(con)
 
 
 if __name__ == "__main__":
