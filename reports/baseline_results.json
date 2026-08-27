@@ -1,0 +1,23 @@
+{
+  "model": "LogisticRegression",
+  "feature_count": 146,
+  "numeric_feature_count": 130,
+  "categorical_feature_count": 16,
+  "metrics": {
+    "roc_auc_mean": 0.7560269883177395,
+    "roc_auc_std": 0.002289232030231527,
+    "pr_auc_mean": 0.23339117629419234,
+    "pr_auc_std": 0.0045902404268120195
+  },
+  "config": {
+    "model_params": {
+      "max_iter": 1000,
+      "class_weight": "balanced",
+      "random_state": 42
+    },
+    "cv_splits": 5,
+    "cv_random_state": 42,
+    "n_rows": 246008,
+    "data_source": "data/processed/dev.parquet (holdout.parquet not used)"
+  }
+}
