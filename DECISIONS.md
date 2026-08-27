@@ -486,3 +486,49 @@ Any future leakage-audit iteration (e.g. testing the `DAYS_CREDIT_UPDATE`
 population specifically) must continue to use `dev.parquet` only.
 
 ---
+
+## Decision: No additional temporal filtering required before baseline modeling
+
+### Context:
+`reports/leakage_report.md` (Phase 4) left one item explicitly open:
+whether bureau's status-snapshot fields (`CREDIT_DAY_OVERDUE`,
+`AMT_CREDIT_SUM_DEBT`, `CREDIT_ACTIVE`) could reflect information from
+after the application decision even on rows where `DAYS_CREDIT <= 0`
+holds. `reports/bureau_temporal_analysis.md` was produced specifically to
+answer this before Phase 5 modeling begins.
+
+### Choice:
+Based on that analysis, no further temporal filter is added to
+`build_bureau_aggregates()`. The existing `DAYS_CREDIT <= 0`
+(`time_filtered=True`) option from Phase 4 remains as-is; bureau's
+snapshot fields are treated as safe to use for Phase 5 baseline modeling
+without further temporal restriction.
+
+### Reasoning:
+- `CREDIT_DAY_OVERDUE` and `AMT_CREDIT_SUM_DEBT` are refreshed as of
+  `DAYS_CREDIT_UPDATE`, and 99.999% of bureau rows have
+  `DAYS_CREDIT_UPDATE <= 0` — meaning their values were genuinely known as
+  of the application decision for essentially the entire dataset. Only 17
+  of 1,716,428 rows (0.000990%) violate this, too few to distort any
+  aggregate or justify a new filter.
+- Two data-quality observations surfaced by the same analysis (undercounted
+  `Sold`/`Bad debt` loan statuses in `bureau_active_loans`/
+  `bureau_closed_loans`; 8,418 unexplained negative `AMT_CREDIT_SUM_DEBT`
+  values) are feature-quality concerns, not temporal-leakage concerns —
+  conflating the two would misclassify a data-quality fix as a leakage fix
+  and risks the wrong remediation being applied.
+
+### Alternatives considered:
+- **Add a `DAYS_CREDIT_UPDATE <= 0` filter alongside the existing
+  `DAYS_CREDIT <= 0` filter**: rejected for now — would exclude only 17
+  rows dataset-wide, with no measurable effect on any aggregate, so it
+  adds pipeline complexity without a corresponding reliability benefit.
+  Revisit if a future, larger bureau extract shows a materially different
+  `DAYS_CREDIT_UPDATE` distribution.
+
+### Impact:
+Closes the temporal-leakage side of the Phase 4 audit. `EXT_SOURCE_*`
+leakage and the two data-quality observations above remain open items for
+a future phase, separate from this decision.
+
+---
