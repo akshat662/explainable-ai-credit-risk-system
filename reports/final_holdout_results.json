@@ -1,0 +1,41 @@
+{
+  "methodology_note": "The 0.110 threshold was selected using dev-only data in Phase 8, before holdout.parquet was ever read. This evaluation applies that pre-specified policy to holdout exactly once; it does not select, sweep, or optimize a threshold on holdout.",
+  "counts": {
+    "n_dev": 246008,
+    "n_holdout": 61503,
+    "dev_holdout_overlap": 0
+  },
+  "predictive_performance": {
+    "holdout_default_prevalence": 0.08072776937710356,
+    "roc_auc": 0.7712698518552005,
+    "pr_auc": 0.2650011178680748,
+    "brier_score": 0.06684001535177231,
+    "constant_baseline_brier_score": 0.07421079663022367,
+    "constant_baseline_probability_source": "dev.parquet TARGET mean (frozen, not re-derived from holdout)"
+  },
+  "business_decision": {
+    "frozen_threshold": 0.11,
+    "lgd": 0.6,
+    "margin": 0.08,
+    "threshold": 0.11,
+    "n_approved": 48380,
+    "n_rejected": 13123,
+    "approval_rate": 0.7866282945547372,
+    "rejection_rate": 0.21337170544526282,
+    "default_rate_approved": 0.045121951219512194,
+    "defaults_captured": 2782,
+    "defaults_captured_rate": 0.5603222557905337,
+    "true_positives": 2782,
+    "false_positives": 10341,
+    "true_negatives": 46197,
+    "false_negatives": 2183,
+    "total_expected_cost": -2385.9599999999996,
+    "mean_expected_cost": -0.03879420516072386,
+    "default_rate_rejected": 0.21199420864131677
+  },
+  "cost_comparison": {
+    "approve_all_mean_cost": -0.025105116823569584,
+    "reject_all_mean_cost": 0.0,
+    "frozen_threshold_mean_cost": -0.03879420516072386
+  }
+}

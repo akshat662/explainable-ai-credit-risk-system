@@ -1594,3 +1594,55 @@ this locked threshold is explicitly deferred to a subsequent phase, per
 the Phase 8 methodology rules.
 
 ---
+
+## Decision: Final holdout evaluation performed once, after full policy freeze — results are not further tuning inputs
+
+### Context:
+By the end of Phase 8, model configuration (Phase 6), probability source
+(Phase 7.8, bootstrap-validated), and business threshold (0.110, Phase 8
+dev-only sweep) were all frozen. `holdout.parquet` had not been read by
+any script in this project up to this point.
+
+### Choice:
+`src/evaluate_final_holdout.py` reads `holdout.parquet` for the first
+time in the project, trains exactly one XGBoost model on all of
+`dev.parquet` (frozen `MODEL_PARAMS`, no CV, no tuning, no calibration),
+scores holdout once, and applies the frozen threshold 0.110 exactly once
+via the same `evaluate_threshold()` function Phase 8 already uses — no
+sweep, no re-selection. A static self-check
+(`verify_no_holdout_threshold_search()`) asserts the script's own source
+contains no `sweep_thresholds`/`select_threshold` calls and exactly one
+`evaluate_threshold()` call against holdout data, so a future edit that
+accidentally reintroduces a sweep fails loudly rather than silently.
+Result: holdout ROC-AUC 0.7713, PR-AUC 0.2650, Brier 0.066840 (identical
+to Phase 7.5/7.8's numbers, confirming reproducibility); at threshold
+0.110, mean expected cost -0.038794/applicant, better than dev's cost at
+the same threshold (-0.038287) — reported honestly as an observation, not
+acted on.
+
+### Reasoning:
+- Holdout's entire value depends on it never having influenced the
+  decisions it's meant to test. Every decision that shapes production
+  behavior — which model, which probability source, which threshold — was
+  locked before this file's first `read_parquet('holdout.parquet')` call,
+  consistent with every prior phase's holdout discipline
+  ([[decision-create-the-devholdout-split-before-any-modeling-and-lock-it]],
+  [[decision-holdout-remains-untouched-throughout-the-leakage-audit]]).
+- These results are reported as a one-time generalization check, not as
+  new evidence to justify changing the model, calibration, or threshold —
+  doing so would retroactively make this "final" evaluation just another
+  round of dev-style tuning with extra steps.
+
+### Alternatives considered:
+- **Re-tune the threshold if holdout suggested a better one**: explicitly
+  rejected per this phase's own instructions — holdout performing
+  differently from dev (better, in this case) is reported, not acted on.
+
+### Impact:
+This is the project's final evaluation artifact
+(`reports/final_holdout_results.json`, `reports/final_holdout_report.md`).
+`holdout.parquet` should not be read again in this project except for a
+genuinely new, separately-justified final check — not for iterating on
+Phase 6-8's now-evaluated decisions.
+
+---
