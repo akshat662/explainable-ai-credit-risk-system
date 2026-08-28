@@ -1,0 +1,58 @@
+{
+  "economics": {
+    "lgd": 0.6,
+    "margin": 0.08,
+    "naive_formula": "p*LGD - margin (incomplete: assumes margin earned unconditionally)",
+    "naive_threshold": 0.13333333333333333,
+    "corrected_formula": "p*LGD - (1-p)*margin (margin conditional on repayment)",
+    "theoretical_threshold": 0.11764705882352942
+  },
+  "baselines": {
+    "dev_default_prevalence": 0.08072908198107379,
+    "reject_everyone_mean_cost": 0.0,
+    "approve_everyone_mean_cost": -0.025104224252869838
+  },
+  "theoretical_threshold_evaluation": {
+    "threshold": 0.11764705882352942,
+    "n_approved": 198384,
+    "n_rejected": 47624,
+    "approval_rate": 0.8064127995837533,
+    "rejection_rate": 0.19358720041624664,
+    "default_rate_approved": 0.04793229292684894,
+    "defaults_captured": 10351,
+    "defaults_captured_rate": 0.5211983887210473,
+    "true_positives": 10351,
+    "false_positives": 37273,
+    "true_negatives": 188875,
+    "false_negatives": 9509,
+    "total_expected_cost": -9404.599999999999,
+    "mean_expected_cost": -0.03822883808656628
+  },
+  "selected_threshold": {
+    "threshold": 0.11,
+    "n_approved": 193990.0,
+    "n_rejected": 52018.0,
+    "approval_rate": 0.7885515918181523,
+    "rejection_rate": 0.21144840818184774,
+    "default_rate_approved": 0.04624465178617455,
+    "defaults_captured": 10889.0,
+    "defaults_captured_rate": 0.5482880161127895,
+    "true_positives": 10889.0,
+    "false_positives": 41129.0,
+    "true_negatives": 185019.0,
+    "false_negatives": 8971.0,
+    "total_expected_cost": -9418.919999999998,
+    "mean_expected_cost": -0.03828704757568859,
+    "distance_to_round_hundredth": 0.0,
+    "distance_to_true_minimum": 0.0040000000000000036,
+    "tie_candidates_count": 26,
+    "tie_tolerance_used": 0.00026217933432466455
+  },
+  "grid": {
+    "min": 0.01,
+    "max": 0.5,
+    "step": 0.001,
+    "n_points": 491
+  },
+  "n_dev_rows": 246008
+}

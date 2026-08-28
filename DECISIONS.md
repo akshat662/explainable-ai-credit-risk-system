@@ -1370,3 +1370,227 @@ consistent everywhere); negative-debt treatment = clip-to-zero + indicator
 rather than as "147 engineered features" anywhere current-facing.
 
 ---
+
+## Decision: Business thresholding comes after model and probability selection, not before or alongside
+
+### Context:
+Phase 8 needed a default probability to threshold. That probability had to
+already be settled — model family, hyperparameters, and calibration
+status — before a business decision rule could be built on top of it.
+
+### Choice:
+Threshold selection (Phase 8) strictly follows model selection (Phase 6),
+calibration investigation (Phase 7), and its bootstrap validation
+(Phase 7.8) — all frozen and unchanged in this phase. `src/decision_threshold.py`
+consumes the existing dev-only OOF `xgb_probability` column as a fixed
+input; it does not retrain, re-tune, or re-calibrate anything.
+
+### Reasoning:
+- A business decision threshold is only as trustworthy as the probability
+  it's built on. Deriving a threshold against a probability that might
+  still change (a different model, different hyperparameters, or a
+  different calibration choice) would mean re-deriving the threshold
+  every time an upstream modeling decision shifted — exactly the kind of
+  rework this project's phase-gated, frozen-artifact structure exists to
+  avoid.
+- Keeping the two concerns separate also keeps the evidence separate: the
+  model/probability's quality is judged by ROC-AUC/PR-AUC/Brier score
+  (ranking and calibration quality); the threshold's quality is judged by
+  expected business cost (a distinct question). Conflating them risks
+  optimizing the threshold search *for* a ranking metric, which this phase
+  explicitly avoids by construction (the sweep never touches AUC).
+
+### Alternatives considered:
+- **Choose the threshold and the model together (joint optimization)**:
+  rejected — would reopen Phase 6/7's already-frozen, already-verified
+  decisions for a phase whose explicit goal is downstream of them, and
+  would conflate a ranking-quality objective with a business-cost
+  objective in one search.
+
+### Impact:
+Any future change to the model or probability source is now grounds to
+explicitly *re-run* Phase 8's threshold sweep, not to silently invalidate
+it — the dependency is one-directional and documented.
+
+---
+
+## Decision: Corrected expected-cost formulation, not the naive brief formula
+
+### Context:
+The Phase 8 brief proposed `expected_cost_approve = p*LGD - margin`
+(giving break-even threshold `margin/LGD ~= 0.13333`) alongside an
+independently agreed theoretical threshold of `margin/(margin+LGD) ~=
+0.11765`. These are genuinely different numbers, not a rounding
+discrepancy, and the brief explicitly required resolving the conflict
+rather than silently picking one.
+
+### Choice:
+The implemented decision rule uses
+`expected_cost_approve(p) = p*LGD - (1-p)*margin`, which algebraically
+reduces to `approve if p < margin/(margin+LGD)` — reproducing the agreed
+theoretical threshold exactly (`0.08/0.68 = 0.11765`). The naive formula
+is retained in code (`naive_expected_cost_approve`, `naive_threshold`)
+for comparison only and is never used for the actual decision.
+
+### Reasoning:
+- The naive formula implicitly treats `margin` as earned *unconditionally*
+  — as if the lender collects the interest margin regardless of whether
+  the loan is ever repaid. That is not how lending economics work: margin
+  is only realized if the loan is repaid (probability `1-p`); if the
+  borrower defaults (probability `p`), the lender loses `LGD` and earns no
+  margin on that loan at all.
+- Making margin conditional on `(1-p)` is the standard expected-profit
+  framing for a binary lend/don't-lend decision
+  (`expected_profit = (1-p)*margin - p*LGD`), and its break-even point is
+  exactly `margin/(margin+LGD)` — matching the independently-agreed
+  theoretical value is a strong signal this is the formulation the project
+  actually intended, not a coincidence to be forced by fitting the code to
+  the number.
+- `validate_threshold_logic()` hard-asserts
+  `expected_cost_approve(theoretical_threshold) == 0` analytically, so any
+  future edit that breaks this consistency fails loudly rather than
+  silently drifting from the agreed economics again.
+
+### Alternatives considered:
+- **Use the naive formula as given, treat 0.11765 as approximate**:
+  rejected — explicitly forbidden by the brief ("do not silently assume
+  these are equivalent... do not simply force the code to produce
+  0.118"), and would have shipped an economically incomplete cost model.
+
+### Impact:
+`reports/threshold_analysis.md` Section 4 documents this reconciliation
+in full so a future reader (or interviewer) sees the resolution, not just
+the final formula.
+
+---
+
+## Decision: Threshold selection uses dev only; holdout is never read in Phase 8
+
+### Context:
+`src/decision_threshold.py` needed labeled data to backtest expected cost
+per threshold. Both `dev.parquet` (via its OOF predictions) and
+`holdout.parquet` have labels.
+
+### Choice:
+Only dev-only OOF predictions (`reports/oof_predictions.csv`, regenerated
+via the frozen pipeline if missing/stale) are used for the entire sweep,
+sensitivity analysis, and threshold selection.
+`evaluate_holdout_calibration.load_holdout_data` /
+`data_quality.HOLDOUT_PATH` are not imported anywhere in this module —
+verified by inspection, not just asserted.
+
+### Reasoning:
+- This is the same holdout discipline the project has held since Phase 3:
+  holdout exists to produce one honest, never-peeked-at final number.
+  Every decision that *shapes* the eventual production behavior — model
+  choice, calibration choice, and now the decision threshold — must be
+  made without it, or the final holdout evaluation stops being a genuine
+  test of anything.
+- OOF predictions specifically (not a full-dev-trained model's in-sample
+  predictions on dev) were used for the same reason Phase 7 used them for
+  calibration fitting: in-sample predictions are optimistic, and an
+  optimistic probability distribution would bias the sweep's picture of
+  where costs actually cross zero.
+
+### Alternatives considered:
+- **Use holdout now "just to see", without acting on it**: rejected per
+  the phase's explicit instruction and the project's standing rule — even
+  looking, without formally using the result, erodes the honesty of a
+  later "final" evaluation in ways that are hard to fully undo.
+
+### Impact:
+Holdout remains valid for a genuine final evaluation of the Phase 8
+threshold, which is explicitly deferred, not performed in this phase (see
+`reports/threshold_analysis.md` Section 12).
+
+---
+
+## Decision: Sensitivity analysis is required, not optional polish
+
+### Context:
+LGD and margin were supplied as a single illustrative pair (0.60, 0.08).
+A threshold derived from one fixed cost pair looks more authoritative
+than it should.
+
+### Choice:
+`run_sensitivity_analysis()` sweeps a 5x5 grid of LGD (0.40-0.80) and
+margin (0.04-0.12), reporting the theoretical and empirical
+cost-minimizing threshold for every combination
+(`reports/sensitivity_analysis.csv`, `reports/sensitivity_heatmap.png`).
+
+### Reasoning:
+- LGD and margin are business assumptions, not measured quantities in this
+  dataset — they were never fit from data and can't be validated the way
+  a model metric can. Presenting the resulting threshold without showing
+  how much it moves under different plausible assumptions would overstate
+  the certainty of a number that is, at its core, a policy input.
+- The sensitivity table makes the threshold's *sensitivity itself* legible
+  as a finding: the heatmap shows the threshold moving smoothly and
+  monotonically with both parameters (higher LGD -> lower threshold;
+  higher margin -> higher threshold), which is itself a sanity check on
+  the formula's correctness, independent of any single chosen threshold.
+
+### Alternatives considered:
+- **Report only the single (0.60, 0.08) result**: rejected — matches the
+  brief's explicit requirement to not "stop at a single arbitrary cost
+  pair," and would leave a reader unable to judge how much the operating
+  point depends on assumptions versus data.
+
+### Impact:
+Any future change to the assumed LGD/margin (e.g. a different loan
+product or funding environment) can be read directly off the existing
+sensitivity table/heatmap without rerunning the sweep from scratch.
+
+---
+
+## Decision: A cost-minimizing threshold is a business policy choice, not the final answer
+
+### Context:
+The dev sweep's mathematically cost-minimizing threshold (0.110, tie-broken
+from a true empirical minimum at 0.114) approves ~78.9% of applicants —
+rejecting far more applicants (21.1%) than the raw default rate (8.07%)
+would suggest, because the LGD/margin asymmetry makes the model cautious
+near the threshold.
+
+### Choice:
+The threshold selected for the next (holdout) evaluation is **0.110**
+(reject if `p_default >= 0.110`), but the report explicitly frames this as
+a policy choice under the stated economics, not a universally "correct"
+number — Section 10 of `reports/threshold_analysis.md` states directly
+that a real lender operating under growth or approval-volume constraints
+would reasonably choose a different point on the sensitivity curve.
+
+### Reasoning:
+- A cost-minimizing threshold answers "what minimizes expected loss given
+  these exact LGD/margin assumptions" — it does not answer "what should a
+  lender actually do," which also depends on constraints (volume targets,
+  regulatory requirements, competitive positioning) entirely outside this
+  model's scope. Presenting the number without this framing would
+  misrepresent a narrow, well-defined optimization as a general business
+  recommendation.
+- The tie-break rule itself (documented in `select_threshold()`'s
+  docstring) matters here: a naive fixed relative-percent tolerance first
+  produced a threshold (0.100) meaningfully worse than the true minimum,
+  because the cost curve is genuinely flat near its optimum and a loose
+  tolerance swept in points far from it. Replacing this with a
+  standard-error-based tolerance (same statistical logic as the Phase 7.8
+  bootstrap CI), then tie-breaking toward round numbers *closest to the
+  true minimum* rather than the smallest value in the band, produced 0.110
+  — close to both the true empirical minimum (0.114) and the theoretical
+  break-even (0.1176).
+
+### Alternatives considered:
+- **Report the exact, non-rounded empirical minimum (0.114) as the
+  threshold**: rejected per the brief's explicit tie-breaking instruction
+  — when cost differences are statistically negligible, the simpler,
+  more communicable number is preferred and documented as such.
+
+### Impact:
+**Threshold locked at 0.110 for the next phase's holdout evaluation.**
+`reports/threshold_analysis.md` is the complete record of how this number
+was derived, including the two formula candidates, the sweep, the
+tie-break correction, and the sensitivity context. Holdout evaluation of
+this locked threshold is explicitly deferred to a subsequent phase, per
+the Phase 8 methodology rules.
+
+---
