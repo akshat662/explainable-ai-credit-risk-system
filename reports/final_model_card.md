@@ -26,11 +26,18 @@ per `SK_ID_CURR` in DuckDB SQL, then `LEFT JOIN`s onto `application_train`
 so grain is preserved by construction (verified: output row count always
 equals `application_train`'s row count, `SK_ID_CURR` always unique).
 
-- **Bureau aggregates** (12 features): loan counts by status, credit/debt
-  sums and averages, overdue statistics, credit type variety.
+- **Bureau aggregates** (13 features): loan counts by status, credit/debt
+  sums and averages, overdue statistics, credit type variety, and
+  `bureau_had_negative_debt`.
   `AMT_CREDIT_SUM_DEBT` negative values (8,418 rows, 0.49% of bureau,
-  affecting 5,886 applicants) are clipped to 0 before summing;
-  `bureau_had_negative_debt` preserves the fact that clipping occurred.
+  affecting 5,886 applicants) are clipped to 0 before summing into
+  `bureau_total_debt` (and, downstream, `debt_income_ratio`);
+  `bureau_had_negative_debt` preserves the fact that clipping occurred,
+  since it may itself carry signal independent of the corrected magnitude.
+  NULL bureau history (no bureau records for an applicant) remains
+  distinguishable from a genuine zero/clipped debt value throughout — the
+  clip only touches negative *values*, never converts a missing record
+  into a zero one.
 - **Previous-application aggregates** (7 features): application count,
   approval/refusal ratios, requested/granted amounts, term.
 - **Financial ratios** (6 features): credit-to-income, annuity-to-income,
@@ -43,13 +50,17 @@ equals `application_train`'s row count, `SK_ID_CURR` always unique).
   throughout (never zero-filled) — absence of history is a different
   fact from a zero-valued history.
 
-Engineered 30+ applicant-level features from relational banking tables
-using DuckDB SQL, producing a 147-feature modeling matrix (146 raw
-engineered features, from `application_train` plus the bureau/previous-
-application aggregates and ratios above, plus 1 `days_employed_anomaly`
-added during sentinel cleaning). This count is consistent across
-`dev.parquet`, `holdout.parquet`, `baseline_results.json`, and
-`xgboost_results.json` — confirmed at freeze time.
+**Engineered 30+ applicant-level features from 2 relational tables,
+producing a 147-feature modelling matrix.** Precisely: 120 raw
+`application_train` columns are passed through unmodified (not
+"engineered"), 26 new features are computed from `bureau`/
+`previous_application` via DuckDB SQL (13 bureau + 7 previous-application
++ 6 financial ratios), and 1 more (`days_employed_anomaly`) is added
+during sentinel cleaning — 120 + 26 + 1 = 147. This count is consistent
+across `dev.parquet`, `holdout.parquet`, `baseline_results.json`, and
+`xgboost_results.json` — confirmed at freeze time. **Not all 147 features
+were engineered by this pipeline** — most are raw applicant fields
+carried through unchanged; only the 27 listed above are newly derived.
 
 ## Validation protocol
 
@@ -99,6 +110,10 @@ predictor by ~9.9% relative Brier score reduction (raw: 9.93%; isotonic:
 question, addressed below, is whether isotonic calibration adds anything
 further on top of the raw model.
 
+**XGBoost is the final model family** — it outperformed the logistic
+regression baseline on both ROC-AUC and PR-AUC (dev CV, above) and is the
+model all calibration experiments below were run against.
+
 ## Calibration method
 
 **Calibration methods evaluated:** raw XGBoost (uncalibrated), Platt
@@ -147,10 +162,20 @@ from consideration regardless of this reversal.
 - **No feature selection or importance analysis has been performed** — all
   147 features are used as-is; some may contribute little or introduce
   noise.
-- **Calibration was evaluated, not yet operationalized** — no business
-  decision threshold, expected-loss calculation, or SHAP explanation layer
-  exists yet on top of the calibrated probability; this is the next phase
-  of work.
+- **No business decision layer exists yet** — no threshold, expected-loss
+  calculation, or SHAP explanation sits on top of the raw XGBoost
+  probability yet; this is the next phase of work.
+- **Isotonic's OOF-vs-full-dev-model mismatch**: the isotonic calibrator
+  (evaluated, not shipped) was fit on out-of-fold predictions produced by
+  5 separate models, each trained on 4/5 of `dev.parquet`, then applied to
+  raw scores from a *different*, sixth model trained on all of
+  `dev.parquet` for holdout scoring. Treating these as interchangeable
+  score distributions is a common, pragmatic approximation, but it is an
+  approximation — a methodological nuance of the calibration experiment
+  itself, worth keeping in mind when reading `reports/calibration_bootstrap_results.json`
+  and `reports/holdout_calibration_report.md`, even though it did not end
+  up mattering for the final choice (raw XGBoost needs no calibrator at
+  all).
 - **Categorical encoding differs between the two benchmarked models**
   (one-hot for logistic regression, native categorical splits for
   XGBoost) — appropriate for each model family, but means the "same 147

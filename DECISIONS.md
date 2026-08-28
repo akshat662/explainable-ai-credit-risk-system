@@ -1316,3 +1316,57 @@ SHAP explanations) on top of a default probability should use the raw
 XGBoost score directly — not an isotonic-calibrated one.
 
 ---
+
+## Decision: Phase 7.9 documentation-consistency freeze
+
+### Context:
+Phase 7.8 established raw XGBoost as the final probability source and
+refreshed most current-facing documentation, but two artifacts were
+missed: `reports/holdout_calibration_report.md`'s Section 3 still asserted
+isotonic as the choice "going forward," and `reports/final_model_card.md`
+mislabeled the bureau feature count (12, pre-negative-debt-fix) and
+reintroduced the "146 engineered features" framing this project has
+otherwise avoided. Phase 7.9 is a documentation-only pass to close these
+gaps before Phase 8 begins.
+
+### Choice:
+No code, model, feature engineering, or split logic changed. Confirmed by
+re-reading the code directly, not from memory: (1) the negative-bureau-
+debt treatment in `src/features.py` — clip-to-zero on `bureau_total_debt`,
+`bureau_had_negative_debt` indicator, NULL-history preservation — matches
+the established Phase 7.5 decision exactly, no drift found. (2) Raw
+XGBoost (uncalibrated) is confirmed as the final probability source;
+`reports/holdout_calibration_report.md` Section 3 and
+`reports/final_model_card.md` are corrected to state this without
+deleting or rewriting the historical calibration analysis that led there.
+(3) Current benchmark numbers (XGBoost ROC-AUC 0.7634 ± 0.0044 / PR-AUC
+0.2499 ± 0.0087; Logistic ROC-AUC 0.7543 ± 0.0039 / PR-AUC 0.2301 ±
+0.0076) remain as established in Phase 7.6 — this phase only confirmed
+consistency, not new values.
+
+### Reasoning:
+- A report titled "Final ... Report" that still recommends a superseded
+  choice is worse than no report at all — a reader landing on it directly
+  (not via DECISIONS.md) would be actively misled, which is a different
+  and more urgent problem than a decision log entry being chronologically
+  ordered.
+- The bureau-feature-count and "146 engineered" issues were introduced by
+  this project's own prior documentation pass (Phase 7.8), not inherited
+  from further back — worth noting plainly rather than glossing over,
+  since this project's own standard is to document mistakes honestly.
+
+### Alternatives considered:
+- **Leave `holdout_calibration_report.md` as pure historical record,
+  unedited**: rejected — unlike DECISIONS.md, it is not framed as a
+  dated log entry; its title and structure present it as describing
+  current reality, so leaving a superseded conclusion in place would
+  misrepresent the present, not just preserve the past.
+
+### Impact:
+Before Phase 8: production probability = raw XGBoost (confirmed,
+consistent everywhere); negative-debt treatment = clip-to-zero + indicator
+(confirmed unchanged in code); feature count = 147 (120 raw +
+26 engineered + 1 sentinel indicator), consistently described as such
+rather than as "147 engineered features" anywhere current-facing.
+
+---
