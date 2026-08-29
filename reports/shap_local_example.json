@@ -1,0 +1,75 @@
+{
+  "applicant_id": 136133,
+  "probability": 0.15999969840049744,
+  "threshold": 0.11,
+  "decision": "REJECT",
+  "distance_to_threshold_percentage_points": 4.999969840049744,
+  "shap_output_space": "log-odds (raw margin); NOT probability space",
+  "base_value_log_odds": -2.479123592376709,
+  "raw_margin_output_log_odds": -1.6582303047180176,
+  "positive_risk_contributors": [
+    {
+      "feature": "EXT_SOURCE_2",
+      "display_name": "External credit score 2",
+      "feature_value": 0.06522930099879802,
+      "shap_value_log_odds": 0.75762
+    },
+    {
+      "feature": "DAYS_ID_PUBLISH",
+      "display_name": "Days since ID document issued",
+      "feature_value": -228.0,
+      "shap_value_log_odds": 0.16768
+    },
+    {
+      "feature": "ORGANIZATION_TYPE",
+      "display_name": "Employer organization type",
+      "feature_value": "XNA",
+      "shap_value_log_odds": 0.13304
+    },
+    {
+      "feature": "prev_avg_term",
+      "display_name": "Average previous loan term",
+      "feature_value": 24.0,
+      "shap_value_log_odds": 0.09719
+    },
+    {
+      "feature": "AMT_GOODS_PRICE",
+      "display_name": "Price of goods being financed",
+      "feature_value": 450000.0,
+      "shap_value_log_odds": 0.09313
+    }
+  ],
+  "negative_protective_contributors": [
+    {
+      "feature": "EXT_SOURCE_3",
+      "display_name": "External credit score 3",
+      "feature_value": 0.5495965024956946,
+      "shap_value_log_odds": -0.16218
+    },
+    {
+      "feature": "EXT_SOURCE_1",
+      "display_name": "External credit score 1",
+      "feature_value": 0.4345178938966018,
+      "shap_value_log_odds": -0.12339
+    },
+    {
+      "feature": "goods_credit_ratio",
+      "display_name": "Goods price-to-credit ratio",
+      "feature_value": 1.0,
+      "shap_value_log_odds": -0.09778
+    },
+    {
+      "feature": "OCCUPATION_TYPE",
+      "display_name": "Occupation",
+      "feature_value": null,
+      "shap_value_log_odds": -0.08901
+    },
+    {
+      "feature": "CODE_GENDER",
+      "display_name": "Gender",
+      "feature_value": "F",
+      "shap_value_log_odds": -0.08323
+    }
+  ],
+  "note": "SHAP values are additive in log-odds space, not probability space. They indicate direction and relative magnitude of each feature's contribution to the model's risk score, not a literal percentage-point change in predicted probability."
+}

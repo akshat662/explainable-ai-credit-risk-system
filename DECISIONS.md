@@ -1715,3 +1715,79 @@ probability source are unchanged. Phase 9 can proceed against the same
 frozen artifacts as before this pass.
 
 ---
+
+## Decision: SHAP TreeExplainer for global + local explainability, in verified log-odds space
+
+### Context:
+Phase 9 needed to explain the frozen XGBoost model's predictions — both
+which features generally drive risk (global) and why a specific
+applicant received their score (local) — and connect that explanation to
+the frozen 0.110 decision threshold, without retraining, tuning, or
+introducing a new predictive model.
+
+### Choice:
+`src/shap_explainability.py` uses `shap.TreeExplainer` against the same
+frozen model training call already validated in Phase 8.5
+(`evaluate_holdout_calibration.train_final_model`, imported unchanged).
+Global importance is computed on a deterministic 2,000-applicant dev
+sample (`random_state=42`); local explanation is a reusable
+`explain_applicant()` function returning a structured dict, designed for
+direct reuse in Phase 10 (Streamlit). SHAP's output space was verified
+empirically against the actual installed `shap==0.52.0`/`xgboost==3.4.1`
+— not assumed from memory — before writing any interpretation code:
+`TreeExplainer.model_output` defaults to `"raw"`, so SHAP values are
+additive in log-odds (raw margin) space
+(`base_value + sum(shap_values) == model.predict(X, output_margin=True)`,
+confirmed to ~7e-6 over the sample). All prose describing individual SHAP
+values uses direction/magnitude language ("risk contributor",
+"protective contributor") — never a claimed percentage-point probability
+change, since that would require decomposing a nonlinear sigmoid
+additively, which log-odds SHAP values do not do. The predicted
+probability, threshold distance, and APPROVE/REJECT decision are computed
+directly via `model.predict_proba`, entirely independent of SHAP.
+
+### Reasoning:
+- Global + local coverage answers both questions this phase needed to
+  answer ("what drives the model in general" and "why did this applicant
+  get this score") without requiring interaction values, dependence
+  plots for dozens of features, counterfactuals, LIME, or any other
+  heavier XAI method — all explicitly out of scope for a project whose
+  stated goal is a credible, interview-defensible explainability layer,
+  not a research contribution.
+- Verifying the output space empirically (rather than assuming SHAP
+  values are probability-space, a common mistake) was necessary to avoid
+  shipping a mathematically incorrect claim like "this feature increased
+  default probability by 5%" — the kind of imprecision that would
+  undermine the project's credibility in exactly the audience (technical
+  interviewers) it's aimed at.
+- Reusing `train_final_model` and `MODEL_PARAMS` rather than redefining
+  them keeps this phase strictly an explanation layer on top of the
+  already-frozen model, not a parallel implementation that could
+  silently drift from it.
+- The local-explanation demo applicant is deliberately chosen (not
+  arbitrary or random) as a REJECT case ~5 percentage points above the
+  threshold — the most illustrative margin for demonstrating
+  threshold-relative reasoning, deterministically selected by minimizing
+  distance to a target probability, not by chance.
+
+### Alternatives considered:
+- **SHAP with `model_output="probability"`**: available in SHAP but not
+  used — it changes the computation path (interventional feature
+  perturbation against a background dataset) and was not necessary once
+  the default "raw" output was verified consistent and additive; adding
+  a second SHAP configuration would have expanded scope without a clear
+  benefit for this project's needs.
+- **LIME or counterfactual explanations**: rejected per this phase's
+  explicit scope boundaries — SHAP's exactness for tree models (no
+  surrogate-model approximation error) and its now-standard status in
+  applied ML make it the more defensible, more interview-relevant choice
+  for this project.
+
+### Impact:
+`explain_applicant()` is the reusable interface Phase 10's Streamlit
+layer should call directly — same signature, same structured return
+value. Global importance results should be read as a description of the
+model's learned behavior on the historically-approved (reject-inference-
+limited) population, not a causal or fairness claim.
+
+---

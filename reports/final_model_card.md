@@ -219,3 +219,12 @@ from consideration regardless of this reversal.
   showing an ambiguous gap; only the raw-vs-isotonic comparison, which was
   genuinely too close to call from point estimates alone, received the
   bootstrap test.
+
+## Explainability (Phase 9)
+
+SHAP-based global and local explainability was added on top of this
+frozen model — see `reports/shap_explainability_report.md`. This is an
+explanation layer only: it does not change the model, its parameters, or
+the 0.110 threshold. SHAP values are in log-odds (raw margin) space,
+verified empirically; see that report for the full derivation and the
+reusable `explain_applicant()` interface.
