@@ -102,6 +102,8 @@ At the agreed economics (LGD=0.6, margin=0.08), the mathematically cost-minimizi
 - The expected-cost model ignores time value of money, funding cost, operational cost of processing an application, and any regulatory constraints on rejection rates or fair-lending requirements.
 - The empirical sweep uses dev's realized outcomes as a backtest; it is not a forward-looking guarantee, and dev itself is one realization of the applicant population (same caveat as noted for holdout in `reports/final_model_card.md`).
 - Raw XGBoost is close to, but not exactly, calibrated (Phase 7 finding) — the threshold sweep uses realized outcomes specifically so that residual miscalibration does not bias the *selected* threshold, but the theoretical break-even value in isolation does assume calibration at that point.
+- **Reject inference**: this entire analysis (defaults captured, default rate among approved/rejected, expected cost) is computed against `dev.parquet`'s labels, which are only observed for applicants Home Credit's incumbent process actually approved. The threshold's expected-cost behavior is validated on the historically-approved population, not against how it would behave if applied to the incumbent process's historically-rejected applicants. See `reports/final_model_card.md`'s "Known limitations" for the full explanation.
+- This analysis assumes **unit exposure** (every applicant weighted equally, independent of loan size). See `reports/exposure_weighted_analysis.md` for a secondary, dev-only sensitivity analysis weighting outcomes by `AMT_CREDIT` — it does not change the frozen 0.110 threshold.
 
 ## 12. Decision locked for final holdout evaluation
 

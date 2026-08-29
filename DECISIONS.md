@@ -1646,3 +1646,72 @@ genuinely new, separately-justified final check — not for iterating on
 Phase 6-8's now-evaluated decisions.
 
 ---
+
+## Decision: Pre-Phase-9 hardening pass — wording fixes, reject-inference limitation, exposure-weighted secondary analysis
+
+### Context:
+A reviewer pass ahead of Phase 9 (SHAP explainability) identified four
+additive gaps in current-facing documentation and one open question about
+the Phase 8 economics: (1) "30+ engineered features" was imprecise —
+the exact count is 27; (2) reject inference (the model is trained/
+evaluated only on Home Credit's historically-approved population) was
+never documented as a limitation; (3) the dev-CV-vs-holdout ROC-AUC/
+PR-AUC gap had no explanation; (4) Phase 8's threshold assumes unit
+exposure per applicant — whether `AMT_CREDIT` was available and suitable
+for a secondary exposure-weighted check was unresolved.
+
+### Choice:
+(1) "30+" replaced with the exact wording "Engineered 27 applicant-level
+features from 2 relational credit-history tables, producing a 147-feature
+modelling matrix" in `README.md` and `reports/final_model_card.md`. (2)
+A full reject-inference limitation added to `reports/final_model_card.md`
+("Known limitations"), cross-referenced (not duplicated) from
+`reports/threshold_analysis.md` and (transitively, via its existing
+cross-reference) `reports/final_holdout_report.md`. (3) A concise
+dev-CV-vs-holdout explanation added to `reports/final_model_card.md`
+(full-dev training set size vs. per-fold ~197K; holdout ROC-AUC is
+~1.8 SD above the CV mean, not statistically extreme). (4) `AMT_CREDIT`
+was confirmed available, complete, and strictly positive in `dev.parquet`
+— `src/exposure_weighted_analysis.py` was implemented as a **separate**
+script (imports `LGD`/`MARGIN`/the threshold grid from
+`decision_threshold.py` unchanged; does not modify it) that reuses the
+existing dev-only OOF predictions, joins `AMT_CREDIT`, and sweeps the
+same grid weighting realized cost by loan size.
+
+### Reasoning:
+- All four items are documentation/analysis additions on top of an
+  already-frozen system, not re-openings of Phase 6-8's decisions — the
+  distinction matters because this project's credibility rests on
+  "frozen means frozen," and every edit here was scoped to stay strictly
+  additive.
+- The exposure-weighted analysis found the cost-minimizing threshold
+  under exposure weighting (0.114) differs from the frozen 0.110 by only
+  +0.004 — a small, non-material difference. This is reported as
+  *evidence the unit-exposure simplification was reasonable*, not as
+  grounds to change production policy; changing the frozen threshold
+  based on a newly-run secondary analysis would violate the same
+  dev-only, no-post-hoc-changes discipline Phase 8 itself established.
+- Reject inference is documented as a limitation of the *data*, not
+  reframed as a flaw in this project's modeling choices — the standard,
+  honest framing for this well-known credit-scoring issue, and
+  explicitly out of scope to solve here (reject-inference modeling is a
+  substantial undertaking in its own right).
+
+### Alternatives considered:
+- **Skip the exposure-weighted analysis and just document unit-exposure
+  as a limitation**: considered, but rejected once `AMT_CREDIT` was
+  confirmed clean and available — per the task's own instruction, a
+  clean, scope-bounded implementation was preferred over a documentation-
+  only placeholder when the data supported it.
+- **Fold the exposure-weighted result into the primary threshold
+  analysis**: rejected — would blur which result is the frozen
+  production policy (unit-exposure, 0.110) and which is supplementary
+  context, exactly the ambiguity the task asked to avoid.
+
+### Impact:
+`reports/exposure_weighted_analysis.json`/`.md` are new, clearly-labeled
+secondary artifacts. The frozen production threshold, model, and
+probability source are unchanged. Phase 9 can proceed against the same
+frozen artifacts as before this pass.
+
+---

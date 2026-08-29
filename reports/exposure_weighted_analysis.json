@@ -1,0 +1,35 @@
+{
+  "status": "SECONDARY / SENSITIVITY ANALYSIS -- does not change the frozen 0.110 threshold",
+  "n_dev_applicants": 246008,
+  "total_dev_exposure_amt_credit": 147442004050.5,
+  "mean_exposure_per_applicant": 599338.2493679067,
+  "frozen_threshold": 0.11,
+  "frozen_threshold_exposure_weighted_evaluation": {
+    "threshold": 0.11,
+    "total_dollar_cost": -5901830681.040001,
+    "mean_dollar_cost_per_applicant": -23990.401454586845,
+    "cost_per_dollar_of_total_exposure": -0.04002815018045047,
+    "approval_rate": 0.7885515918181523
+  },
+  "frozen_threshold_unit_weighted_evaluation_for_reference": {
+    "threshold": 0.11,
+    "total_dollar_cost": -9418.919999999998,
+    "mean_dollar_cost_per_applicant": -0.03828704757568859,
+    "cost_per_dollar_of_total_exposure": -0.03828704757568859,
+    "approval_rate": 0.7885515918181523
+  },
+  "exposure_weighted_optimal_threshold_evaluation": {
+    "threshold": 0.114,
+    "total_dollar_cost": -5913029063.16,
+    "mean_dollar_cost_per_applicant": -24035.921852785275,
+    "cost_per_dollar_of_total_exposure": -0.04010410127859319,
+    "approval_rate": 0.798323631751813
+  },
+  "threshold_difference_optimal_minus_frozen": 0.0040000000000000036,
+  "grid": {
+    "min": 0.01,
+    "max": 0.5,
+    "step": 0.001,
+    "n_points": 491
+  }
+}

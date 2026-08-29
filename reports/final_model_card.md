@@ -50,8 +50,8 @@ equals `application_train`'s row count, `SK_ID_CURR` always unique).
   throughout (never zero-filled) — absence of history is a different
   fact from a zero-valued history.
 
-**Engineered 30+ applicant-level features from 2 relational tables,
-producing a 147-feature modelling matrix.** Precisely: 120 raw
+**Engineered 27 applicant-level features from 2 relational credit-history
+tables, producing a 147-feature modelling matrix.** Precisely: 120 raw
 `application_train` columns are passed through unmodified (not
 "engineered"), 26 new features are computed from `bureau`/
 `previous_application` via DuckDB SQL (13 bureau + 7 previous-application
@@ -110,6 +110,20 @@ predictor by ~9.9% relative Brier score reduction (raw: 9.93%; isotonic:
 question, addressed below, is whether isotonic calibration adds anything
 further on top of the raw model.
 
+**Why holdout ROC-AUC/PR-AUC are higher than the dev CV mean.** Each dev
+CV fold trains on only ~197K of the 246,008 dev applicants (80% of dev,
+per fold); the holdout-scoring model is trained on all 246,008. A model
+with modestly more training data can reasonably score somewhat better on
+an independent sample, so some gap is expected by construction, not a
+sign of a data or methodology problem. Concretely: holdout ROC-AUC
+(0.7713) is about 1.8 standard deviations above the CV mean (0.7634,
+std 0.0044) — `(0.7713 - 0.7634) / 0.0044 ≈ 1.8`. This is a single-fold
+comparison at a normal magnitude of variation, not a statistically
+extreme result, and it should not be read as evidence that holdout
+performance "should" equal the CV mean — the two are estimates from
+different training-set sizes and different (non-overlapping) evaluation
+samples by design.
+
 **XGBoost is the final model family** — it outperformed the logistic
 regression baseline on both ROC-AUC and PR-AUC (dev CV, above) and is the
 model all calibration experiments below were run against.
@@ -142,6 +156,23 @@ from consideration regardless of this reversal.
 
 ## Known limitations
 
+- **Reject inference: the model is trained and evaluated only on Home
+  Credit's *approved* population.** `application_train`'s outcome label
+  (`TARGET`) is only observed for applicants Home Credit's incumbent
+  underwriting process actually approved and issued a loan to — there is
+  no outcome for applicants that process rejected, since a rejected
+  applicant was never given a loan to default on or repay. Every metric
+  in this project (ROC-AUC, PR-AUC, Brier score, the holdout evaluation,
+  the expected-cost threshold analysis) is therefore a statement about
+  model performance *on the historically-approved population*, not
+  proof of how the model would perform if used to evaluate applicants
+  the incumbent process would have rejected. This is the standard
+  credit-scoring problem known as "reject inference," and it is a
+  limitation of the available data, not a flaw introduced by this
+  project's modeling choices. Reject-inference modeling (e.g. imputing
+  or bounding outcomes for the unobserved rejected population) is a
+  well-studied but substantial undertaking in its own right and is
+  explicitly out of scope here.
 - **`EXT_SOURCE_1/2/3` leakage has not been tested.** The Phase 4/4.5
   leakage audits covered bureau/previous-application record timing only;
   these external credit-bureau scores remain unexamined.

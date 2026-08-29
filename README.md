@@ -29,11 +29,11 @@ Phase 8 (business decision engine) next.
 - 🚧 Phase 8 — business decision thresholds, SHAP explanations, Streamlit
   deployment — not yet started
 
-Engineered 30+ applicant-level features from 2 relational tables,
-producing a 147-feature modelling matrix. Current benchmark (development
-set, stratified 5-fold CV): XGBoost ROC-AUC 0.7634 ± 0.0044, PR-AUC 0.2499
-± 0.0087, versus a logistic regression baseline of ROC-AUC 0.7543 ±
-0.0039, PR-AUC 0.2301 ± 0.0076.
+Engineered 27 applicant-level features from 2 relational credit-history
+tables, producing a 147-feature modelling matrix. Current benchmark
+(development set, stratified 5-fold CV): XGBoost ROC-AUC 0.7634 ± 0.0044,
+PR-AUC 0.2499 ± 0.0087, versus a logistic regression baseline of ROC-AUC
+0.7543 ± 0.0039, PR-AUC 0.2301 ± 0.0076.
 
 **Production probability source: raw, uncalibrated XGBoost.** Calibration
 (Platt scaling, isotonic regression) was investigated, not assumed: Platt
