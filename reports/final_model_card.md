@@ -228,3 +228,14 @@ explanation layer only: it does not change the model, its parameters, or
 the 0.110 threshold. SHAP values are in log-odds (raw margin) space,
 verified empirically; see that report for the full derivation and the
 reusable `explain_applicant()` interface.
+
+## Deployment (Phase 10)
+
+A Streamlit demo (`app/app.py`, backed by `src/inference.py`) was built on
+top of this frozen model — see `reports/phase10_deployment_report.md`. It
+loads a build-once model artifact (`src/build_model_artifact.py`,
+`models/xgboost_frozen.json`), reconstructs the 147-feature input from a
+curated applicant-input form plus a frozen dev-median/mode template for
+fields the form does not collect, and reuses Phase 9's `explain_applicant()`
+unchanged for decision-aware SHAP explanations. No model, threshold, or
+feature-engineering code changed; holdout data is never read by the app.

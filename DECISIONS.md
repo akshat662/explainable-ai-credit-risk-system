@@ -1791,3 +1791,96 @@ model's learned behavior on the historically-approved (reject-inference-
 limited) population, not a causal or fairness claim.
 
 ---
+
+## Decision: Streamlit deployment layer with a build-once model artifact, curated inputs, and a dev-median/mode template for unexposed features
+
+### Context:
+Phase 10 needed a deployment/demo layer around the frozen model, threshold,
+and Phase 9 SHAP explainer — without retraining, without reading holdout
+data, and without exposing all 147 model features as manual UI fields
+(explicitly ruled out as unusable). The 147 features are produced by a
+relational SQL aggregation over `bureau.csv`/`previous_application.csv`
+joined onto `application_train` (`src/features.py`) — there is no way for an
+interactive form to re-run that aggregation for a hypothetical applicant who
+has no rows in those tables, so a direct "form maps 1:1 onto the SQL
+pipeline" design was never on the table. See
+`reports/phase10_deployment_report.md` for the full architecture writeup.
+
+### Choice:
+- **`src/build_model_artifact.py`** (new, run once, offline): calls
+  `evaluate_holdout_calibration.train_final_model()` unchanged — the same
+  training call Phase 8.5 and Phase 9 already use — and persists the result
+  via XGBoost's native `model.save_model()`, plus a `feature_schema.json`
+  capturing the frozen 147-column order, each categorical column's exact
+  training-time category set, and a per-column dev median/mode template.
+- **`src/inference.py`** (new): the only model-facing module the app
+  imports. Loads the artifact once (never trains), reconstructs a
+  147-column applicant row from a curated ~35-field input plus the six
+  ratio features (recomputed with `src/features.py`'s exact formulas) plus
+  the frozen template for every unexposed feature, and calls
+  `predict_proba` / the frozen 0.110 threshold (imported from
+  `evaluate_final_holdout.FROZEN_THRESHOLD`) / Phase 9's unchanged
+  `explain_applicant()`.
+- **`app/app.py`** (new): UI only. Grouped applicant-input sections,
+  threshold-relative risk result, decision-aware SHAP explanation, a model
+  information panel, and three hand-constructed, verified synthetic demo
+  profiles (APPROVE / near-threshold REJECT / clear REJECT) — explicitly
+  labeled synthetic, not derived from dev or holdout data.
+- **"No history" stays missing, not zero**: unchecking "has bureau credit
+  history" / "has previous applications" in the UI sets those columns to
+  `None` (NaN), preserving the same distinction `src/features.py` already
+  documents, rather than letting an unset numeric field silently mean "zero
+  loans."
+
+### Reasoning:
+- Retraining on every app run was rejected outright: Phase 6-9 already
+  established a single, validated training call: persisting its output once
+  is a packaging concern, not a modeling change, and keeps the interactive
+  app fast without touching MODEL_PARAMS or the training methodology.
+- The curated input fields were deliberately chosen to cover every one of
+  the top-15 global SHAP features from `reports/shap_explainability_report.md`
+  (directly, or as an input to a derived ratio) — so a user can actually
+  move the fields that drive this model's predictions, not a disconnected
+  subset that happens to look like a form.
+- A single-row categorical DataFrame with a missing value has zero
+  locally-inferred pandas categories, and XGBoost hard-errors on that
+  (verified empirically, not assumed) — `build_feature_row()` therefore
+  always casts categorical columns with an explicit `categories=` list from
+  the frozen schema, both preventing that crash and guaranteeing every UI
+  dropdown only offers values the model actually saw in training.
+- The dev-median/mode template for unexposed features (rather than
+  imputation logic invented for this phase) was chosen because it is the
+  simplest defensible way to fill ~112 fields nobody would reasonably type
+  into a form, and it is disclosed explicitly in the app rather than
+  presented as a complete applicant profile.
+
+### Alternatives considered:
+- **Re-running the full relational feature pipeline per submitted
+  applicant**: rejected — there are no bureau/previous-application rows for
+  a hypothetical applicant to aggregate; this was the core constraint the
+  whole design works around, not an oversight.
+- **Exposing all 147 features as manual fields**: rejected per the explicit
+  project brief — unusable, and most of the excluded fields (building/
+  apartment descriptors, `FLAG_DOCUMENT_2`..`21`) carry little individual
+  signal.
+- **Zero-filling unexposed/missing fields**: rejected — contradicts this
+  project's own established "missing ≠ zero" convention
+  (`src/features.py`, `reports/final_model_card.md`) and would silently
+  misrepresent "no bureau history" as "zero debt," a materially different
+  signal to a model trained to distinguish the two.
+- **A FastAPI/REST serving layer instead of Streamlit**: rejected — no
+  concrete requirement calls for a separate client/server split for a
+  single-demo portfolio project; `streamlit` was already in
+  `requirements.txt` from earlier planning, and a REST layer would add
+  surface area without adding interview-relevant capability.
+
+### Impact:
+The frozen model, threshold, and Phase 9 SHAP logic are unchanged — Phase 10
+only adds a consumption layer on top. `models/xgboost_frozen.json` and
+`models/feature_schema.json` are build artifacts checked into the repo (not
+`data/processed/`-style raw-data derivatives) so the app runs without
+requiring `data/raw/` to be present. Rebuilding the artifact after any
+future change to `src/features.py`, `src/train_xgboost.py`, or the dev/
+holdout split requires re-running `src/build_model_artifact.py`.
+
+---
